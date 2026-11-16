@@ -2,7 +2,7 @@
    The app page is served from the phone's cache first, then quietly updated in the
    background when online, so facilitators get new versions without losing offline use.
    Results are never handled here: they are saved on the phone and sent by the app. */
-const CACHE = "step2read-v1.1.1";
+const CACHE = "step2read-v1.1.2";
 const CORE = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (e) => {
@@ -19,7 +19,7 @@ self.addEventListener("fetch", (e) => {
   if (url.origin !== location.origin && !isFont) return;
   e.respondWith(caches.open(CACHE).then(async (c) => {
     const hit = await c.match(req, { ignoreSearch: url.origin === location.origin });
-    const net = fetch(req).then((r) => { if (r && (r.ok || r.type === "opaque")) c.put(req, r.clone()); return r; }).catch(() => null);
+    const net = fetch(url.origin === location.origin ? new Request(req, { cache: "no-cache" }) : req).then((r) => { if (r && (r.ok || r.type === "opaque")) c.put(req, r.clone()); return r; }).catch(() => null);
     if (hit) { e.waitUntil(net); return hit; }
     const r = await net;
     if (r) return r;
