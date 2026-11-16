@@ -2,7 +2,7 @@
    The app page is served from the phone's cache first, then quietly updated in the
    background when online, so facilitators get new versions without losing offline use.
    Results are never handled here: they are saved on the phone and sent by the app. */
-const CACHE = "step2read-v1.1";
+const CACHE = "step2read-v1.1.1";
 const CORE = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (e) => {
