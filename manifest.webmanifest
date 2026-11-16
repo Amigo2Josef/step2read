@@ -1,0 +1,14 @@
+{
+  "name": "Step2Read",
+  "short_name": "Step2Read",
+  "description": "Find each child's step on the reading ladder, then teach the next one.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F3F6F3",
+  "theme_color": "#1E3D36",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

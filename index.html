@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Step2Read</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#1E3D36">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Andika:wght@400;700&family=Lexend:wght@400;500;600;700&display=swap">
@@ -69,6 +73,10 @@ textarea { min-height: 120px; resize: vertical; }
 .top .in { max-width: 760px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .brand { font-weight: 700; font-size: 1.15rem; display: flex; align-items: baseline; gap: 2px; color: var(--ink); }
 .brand b { color: var(--maize); font-weight: 700; }
+.syncchip { font: inherit; font-size: .75rem; padding: 4px 10px 4px 22px; border-radius: 99px; border: 1px solid var(--line); background: var(--card); color: var(--ink); font-weight: 600; cursor: pointer; position: relative; }
+.syncchip::before { content: ""; position: absolute; left: 9px; top: 50%; width: 8px; height: 8px; margin-top: -4px; border-radius: 50%; background: var(--muted); }
+.syncchip.ok::before { background: var(--good); } .syncchip.wait::before { background: var(--maize); } .syncchip.busy::before { background: var(--maize); animation: s2rpulse 1s infinite; } .syncchip.off::before { background: var(--line); }
+@keyframes s2rpulse { 50% { opacity: .3; } }
 .modechip { font: inherit; font-size: .75rem; padding: 4px 10px; border-radius: 99px; background: var(--board-soft); color: var(--ink); font-weight: 600; border: 0; cursor: default; }
 .modechip.admin { background: var(--maize); color: #1B1405; cursor: pointer; min-height: 32px; padding-inline: 12px; }
 nav.tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; background: var(--card); border-top: 1px solid var(--line);
@@ -209,7 +217,7 @@ code.k { font-family: var(--ui); background: var(--board-soft); padding: 1px 6px
 
 <header class="top"><div class="in">
   <div class="brand" aria-label="Step2Read">Step<b>2</b>Read</div>
-  <div class="row" style="gap:8px"><button type="button" class="modechip" id="modechip" data-act="adminConsole" hidden></button></div>
+  <div class="row" style="gap:8px"><button type="button" class="syncchip off" id="syncchip" data-act="syncNow" hidden>Sync off</button><button type="button" class="modechip" id="modechip" data-act="adminConsole" hidden></button></div>
 </div></header>
 <main class="wrap" id="app" aria-live="polite"></main>
 <nav class="tabs" id="tabs" hidden><div class="in"></div></nav>
@@ -251,8 +259,79 @@ const dataKey = (id) => (id === "main" ? KEY : KEY + ":" + id);
 function wsSave() { try { localStorage.setItem(WS_KEY, JSON.stringify(WS)); } catch (e) {} }
 function wsRead(id) { try { const r = localStorage.getItem(dataKey(id)); return r ? JSON.parse(r) : null; } catch (e) { return null; } }
 function load() { const s = wsRead(WS.cur); if (s) { s.ui = { screen: s.mode ? "home" : "welcome" }; return s; } return blank(); }
-function save() { try { const c = { ...S, ui: undefined, run: undefined }; localStorage.setItem(dataKey(WS.cur), JSON.stringify(c)); } catch (e) {} }
+function save() { try { const c = { ...S, ui: undefined, run: undefined }; localStorage.setItem(dataKey(WS.cur), JSON.stringify(c)); } catch (e) {}  if (typeof Sync !== "undefined") Sync.soon(); }
 S = load();
+
+// ------------------------------------------------------------------ sync (results to the programme's Google Sheet)
+// Works offline: every change is saved on this phone first. Whenever the phone is online,
+// the latest results for each class on this phone are sent to the programme's Google Sheet.
+// If sending fails, nothing is lost; it simply tries again on the next change, when the
+// phone comes back online, when the app is reopened, and every few minutes.
+const SYNC_URL = "";            // paste the Google Apps Script web app link here (ends in /exec)
+const SYNC_KEY = "s2r-pilot-2026"; // must match PROGRAMME_KEY in the Apps Script
+const APP_VERSION = "1.1";
+const Sync = (() => {
+  const META = "step2read.sync";
+  let meta = {}; try { meta = JSON.parse(localStorage.getItem(META) || "{}"); } catch (e) {}
+  if (!meta.device) { meta.device = "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+  meta.sent = meta.sent || {};
+  const keep = () => { try { localStorage.setItem(META, JSON.stringify(meta)); } catch (e) {} };
+  keep();
+  let timer = null, busy = false;
+  const enabled = () => !!SYNC_URL;
+  function stores() { // every class or child saved on this phone
+    const out = [];
+    try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i);
+      if (k === KEY || k.startsWith(KEY + ":")) { const id = k === KEY ? "main" : k.slice(KEY.length + 1); const d = wsRead(id); if (d) out.push([id, d]); } } } catch (e) {}
+    return out;
+  }
+  function payload(id, d) {
+    if (!d || !d.mode || d.example || !Array.isArray(d.learners) || !d.learners.length) return null;
+    const st = d.setup || {};
+    return { app: APP_VERSION, key: SYNC_KEY, device: meta.device, store: id, mode: d.mode,
+      facilitator: st.name || "", school: st.school || "", schoolCode: (st.code || "").toUpperCase(), grade: st.grade || "", minutes: st.minutes || "", days: st.days || "", phone: st.phone || "",
+      planStart: d.plan ? d.plan.start || "" : "",
+      learners: d.learners.map((l) => ({ id: l.id, name: l.name || "", assessments: (l.assessments || []).map((a) => ({
+        id: a.id, date: a.date, form: a.form, grade: a.grade, level: a.level, startUnit: a.startUnit, wcpm: a.wcpm || 0,
+        acc: a.acc ?? "", comp: a.comp ?? "", gaps: a.gaps || [], diagnosed: !!a.diagnosed, source: a.source || "school" })) })),
+      homeLog: d.homeLog || [] };
+  }
+  const sig = (o) => { const t = JSON.stringify(o); let h = 0; for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return t.length + ":" + h; };
+  function pending() { let n = 0; for (const [id, d] of stores()) { const p = payload(id, d); if (p && meta.sent[meta.device + ":" + id] !== sig(p)) n++; } return n; }
+  async function run(manual) {
+    if (!enabled() || busy) return;
+    if (!navigator.onLine) { if (manual) { meta.err = "No internet right now. Results are safe on this phone and will send when you are back online."; keep(); paint(); } return; }
+    busy = true; paint(); let ok = 0, fail = "";
+    for (const [id, d] of stores()) {
+      const p = payload(id, d); if (!p) continue; const k = meta.device + ":" + id; const g = sig(p);
+      if (meta.sent[k] === g && !manual) continue;
+      try {
+        const r = await fetch(SYNC_URL, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify({ ...p, sentAt: new Date().toISOString() }) });
+        const j = await r.json().catch(() => ({}));
+        if (r.ok && j.ok) { meta.sent[k] = g; ok++; } else fail = j.error || "The Sheet did not accept the results.";
+      } catch (e) { fail = "Could not reach the Sheet. Will try again."; }
+    }
+    if (!fail) { meta.last = new Date().toISOString(); meta.err = ""; } else meta.err = fail;
+    busy = false; keep(); paint();
+  }
+  function soon() { clearTimeout(timer); timer = setTimeout(() => run(false), 4000); paint(); }
+  function state() {
+    if (!enabled()) return { cls: "off", text: "Sync off", long: "Sync is not set up on this copy of Step2Read. Results are saved on this phone only." };
+    if (busy) return { cls: "busy", text: "Syncing…", long: "Sending results to the programme Sheet…" };
+    const n = pending();
+    if (!navigator.onLine) return { cls: "wait", text: n ? "Offline · saved" : "Offline", long: n ? `You are offline. Everything is saved on this phone, and ${n === 1 ? "the latest results" : "results for " + n + " classes"} will send automatically when you are back online.` : "You are offline. Everything is saved on this phone and already sent." };
+    if (meta.err && n) return { cls: "wait", text: "Waiting to sync", long: meta.err };
+    if (n) return { cls: "wait", text: "Waiting to sync", long: "New results will send in a moment." };
+    return { cls: "ok", text: "Synced", long: meta.last ? `All results sent to the programme Sheet. Last sync ${new Date(meta.last).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}.` : "Nothing to send yet." };
+  }
+  function paint() { const b = document.getElementById("syncchip"); if (!b) return; const st = state();
+    b.hidden = !S.mode || !!S.example; b.className = "syncchip " + st.cls; b.textContent = st.text; b.title = st.long;
+    const c = document.getElementById("syncCard"); if (c) c.textContent = st.long; }
+  window.addEventListener("online", () => run(false)); window.addEventListener("offline", paint);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") run(false); });
+  setInterval(() => run(false), 3 * 60 * 1000);
+  return { run, soon, paint, state, device: () => meta.device, enabled };
+})();
 
 // ------------------------------------------------------------------ helpers
 const $ = (s) => document.querySelector(s);
@@ -502,7 +581,8 @@ function render() {
   chip.hidden = !S.mode && !WS.admin; chip.classList.toggle("admin", !!WS.admin);
   chip.textContent = WS.admin ? (S.ui.screen === "admin" ? "Super admin" : `Admin · ${(PORTALS[WS.cur] || {}).short || role} ⇄`) : role;
   const fn = { welcome: vWelcome, setup: vSetup, home: vHome, learners: vLearners, learner: vLearner, assess: vAssess, result: vResult, plan: vPlan, session: vSession, more: vMore, paste: vPaste, links: vLinks, admin: vAdmin }[S.ui.screen] || vHome;
-  $("#app").innerHTML = (S.ui.flashTop ? `<div class="banner small" style="margin-bottom:14px">${esc(S.ui.flashTop)}</div>` : "") + fn().replace(/([.!?])”\./g, "$1”") + `<p class="foot-note">Prototype · Confidential · © Joseph Omondi</p>`; renderTabs(); afterRender();
+  Sync.paint();
+  $("#app").innerHTML = (S.ui.flashTop ? `<div class="banner small" style="margin-bottom:14px">${esc(S.ui.flashTop)}</div>` : "") + fn().replace(/([.!?])”\./g, "$1”") + `<p class="foot-note">Step2Read · © Linchpin Education</p>`; renderTabs(); afterRender();
 }
 function afterRender() { const f = document.querySelector("[data-autofocus]"); if (f) f.focus(); }
 
@@ -548,7 +628,7 @@ function vSetup() {
   <div class="card stack">
     <label class="f">Your name<input id="f_name" required value="${esc(s.name || "")}" placeholder="${p ? "e.g. Mama Akinyi" : "e.g. Teacher Wanjiku"}" data-autofocus></label>
     ${p ? `<label class="f">Child's name<input id="f_child" required value="${esc((S.learners[0] || {}).name || "")}" placeholder="e.g. Amani"></label>`
-        : `<label class="f">School<input id="f_school" value="${esc(s.school || "")}" placeholder="e.g. Upendo Academy"></label>`}
+        : `<label class="f">School<input id="f_school" value="${esc(s.school || "")}" placeholder="e.g. Upendo Academy"></label><label class="f">School code <span class="muted small">(from your programme lead)</span><input id="f_code" value="${esc(s.code || "")}" placeholder="e.g. SSDT" autocapitalize="characters" style="text-transform:uppercase"></label>`}
     <label class="f">${p ? "Child's grade" : "Class grade"}<select id="f_grade">${gradeOpts}</select></label>
     <div class="grid2">
       <label class="f">Minutes a day<select id="f_min">${mins.map((m) => `<option ${m === dm ? "selected" : ""}>${m}</option>`).join("")}</select></label>
@@ -1215,7 +1295,10 @@ function shareText() {
 function vMore() {
   const data = JSON.stringify({ ...S, ui: undefined, run: undefined, reader: undefined });
   return `<div class="stack"><h1>Data and settings</h1>
-  <div class="card stack-s"><h3>Back up</h3><p class="small muted">Everything is stored on this phone only. Copy the backup text and keep it somewhere safe (a WhatsApp message to yourself works).</p>
+  <div class="card stack-s"><h3>Sync to the programme</h3><p class="small" id="syncCard">${esc(Sync.state().long)}</p>
+    <p class="small muted">Everything is saved on this phone first, so Step2Read works with no signal. When the phone is online, results send automatically.${Sync.enabled() ? "" : ""} Phone ID: ${esc(Sync.device())}</p>
+    ${Sync.enabled() ? `<div class="row"><button class="btn primary" data-act="syncNow">Sync now</button></div>` : ""}</div>
+  <div class="card stack-s"><h3>Back up</h3><p class="small muted">Everything is stored on this phone. Copy the backup text and keep it somewhere safe (a WhatsApp message to yourself works).</p>
     <textarea id="bk" readonly style="min-height:90px;font-size:.75rem">${esc(data)}</textarea><div class="row"><button class="btn primary" data-act="copyBk">Copy backup</button><span id="bkMsg" class="small muted"></span></div></div>
   <div class="card stack-s"><h3>Restore</h3><p class="small muted">Paste a backup to replace what is on this phone.</p><textarea id="rs" style="min-height:80px;font-size:.75rem" placeholder="Paste backup text here"></textarea>
     <div class="row"><button class="btn" data-act="restore">Restore backup</button><span id="rsMsg" class="small muted"></span></div></div>
@@ -1225,7 +1308,7 @@ function vMore() {
     <div class="row"><a class="btn" href="https://wa.me/?text=${encodeURIComponent(shareText())}" target="_blank" rel="noopener">Share on WhatsApp</a><button class="btn" data-act="copySum">Copy summary</button></div></div>
   <div class="card stack-s"><h3>Settings</h3><p class="small">${isParent() ? "Home" : esc(S.setup.school || "Class")} · ${GRADE_LABEL[S.setup.grade]} · ${S.setup.minutes} minutes × ${S.setup.days} days</p>
     <div class="row"><button class="btn" data-act="editSetup">Change setup</button>${S.ui.confirmReset ? `<button class="btn danger" data-act="resetAll">Yes, erase everything</button><button class="btn ghost" data-act="cancelReset">Keep my data</button>` : `<button class="btn danger" data-act="askReset">Erase all data</button>`}</div></div>
-  <p class="small muted">Step2Read v1.0 · English · aligned to the KICD CBE designs (PP1–Grade 3) · printable packs come with the school web version.</p></div>`;
+  <p class="small muted">Step2Read v1.1 · English · aligned to the KICD CBE designs (PP1–Grade 3) · printable packs come with the school web version.</p></div>`;
 }
 
 // ------------------------------------------------------------------ school–home link (WhatsApp codes, no server)
@@ -1456,7 +1539,7 @@ function seedExampleLinks() {   // demo only: some families linked, with home ac
 // ------------------------------------------------------------------ super admin (build mode)
 // One phone, several portals. Each portal is a separate workspace with its own data, so switching never overwrites anything.
 // Access levels are listed in ACCESS so more can be added later (school leader, coach, programme admin).
-const BUILD_MODE = true;   // shows the Super admin entry; set to false for the public release
+const BUILD_MODE = false;  // true shows the Super admin entry (testing only); keep false for the live app
 const PORTALS = {
   teacher: { label: "Teacher portal", short: "Teacher", role: "teacher", desc: "A class you set up yourself for testing." },
   parent: { label: "Parent portal", short: "Parent", role: "parent", desc: "A parent's phone: link it to a child from the teacher portal, or set up a child on its own." },
@@ -1540,6 +1623,7 @@ document.addEventListener("click", async (e) => {
   const actions = {
     mode: () => { S.ui.mode = el.dataset.v; S.setup = { grade: "G2", minutes: el.dataset.v === "parent" ? 15 : 30, days: 5 }; S.learners = []; go("setup", { mode: el.dataset.v }); },
     example: () => { if (WS.admin) { openPortal({ g1: "ex-g1", g2: "ex-g2", p: "ex-p" }[el.dataset.v || "g2"]); return; } if (el.dataset.v === "p") loadParentExample(); else loadExample(el.dataset.v || "g2"); render(); window.scrollTo(0, 0); },
+    syncNow: () => { if (!Sync.enabled()) { go("more"); return; } Sync.run(true); },
     cancelSetup: () => go(S.mode ? "home" : "welcome"),
     editSetup: () => go("setup", { mode: S.mode }),
     pickAssess: () => { const n = S.learners.find((l) => !latest(l)) || checksDue()[0] || S.learners[0]; if (n) startRun(n.id); },
@@ -1615,7 +1699,7 @@ document.addEventListener("submit", (e) => {
   const p = S.ui.mode === "parent"; const v = (id) => (document.getElementById(id) || {}).value || "";
   S.mode = p ? "parent" : "teacher"; S.example = false;
   S.setup = { ...(S.setup || {}), name: v("f_name").trim(), school: p ? "" : v("f_school").trim(), grade: v("f_grade"), minutes: +v("f_min"), days: +v("f_days") };
-  if (!p) { S.setup.homeMinutes = +v("f_hm") || 15; S.setup.homeDays = +v("f_hd") || 5; S.setup.phone = v("f_phone").trim(); }
+  if (!p) { S.setup.code = v("f_code").trim().toUpperCase(); S.setup.homeMinutes = +v("f_hm") || 15; S.setup.homeDays = +v("f_hd") || 5; S.setup.phone = v("f_phone").trim(); }
   if (p) { const nm = v("f_child").trim() || "My child"; if (S.learners[0]) S.learners[0].name = nm; else S.learners = [{ id: uid(), name: nm, assessments: [] }]; }
   else { const names = v("f_names").split("\n").map((x) => x.trim()).filter(Boolean); const keep = Object.fromEntries(S.learners.map((l) => [l.name, l]));
     S.learners = names.map((n) => keep[n] || { id: uid(), name: n, assessments: [] }); }
@@ -1624,6 +1708,8 @@ document.addEventListener("submit", (e) => {
 if (S.plan && S.plan.v !== 2 && S.learners.some(latest)) { try { makePlan(); } catch (e) {} }
 try { const c = new URLSearchParams(location.search).get("code"); if (c) S.ui = { screen: "paste", pre: "S2R-" + c }; } catch (e) {}
 render();
+Sync.run(false);
+if ("serviceWorker" in navigator && location.protocol !== "file:") { window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {})); }
 
 </script>
 
