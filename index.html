@@ -274,7 +274,7 @@ const Auth = (() => {
   // Links from invite and reset emails arrive as #access_token=...&type=invite|recovery
   try {
     const h = new URLSearchParams(location.hash.slice(1));
-    if (h.get("access_token")) { setSession({ access_token: h.get("access_token"), refresh_token: h.get("refresh_token"), expires_at: h.get("expires_at"), expires_in: h.get("expires_in") }); link = { type: h.get("type") || "invite" }; }
+    if (h.get("access_token")) { setSession({ access_token: h.get("access_token"), refresh_token: h.get("refresh_token"), expires_at: h.get("expires_at"), expires_in: h.get("expires_in") }); link = { type: h.get("type") || "invite" }; a.pw = link.type; keep(); }
     else if (h.get("error") || h.get("error_code")) link = { error: h.get("error_code") === "otp_expired" ? "This link has expired or has already been used. Ask your programme lead to send a new one." : (h.get("error_description") || "This link did not work.").replace(/\+/g, " ") };
     if (link) history.replaceState(null, "", location.pathname + location.search);
   } catch (e) {}
@@ -1737,8 +1737,9 @@ const Gate = (() => {
   // Which screen should show? null means the reading app.
   function route() {
     if (Auth.link && Auth.link.error) { G.screen = "signin"; G.err = Auth.link.error; Auth.clearLink(); return; }
-    if (Auth.link && Auth.link.type) { G.linkType = Auth.link.type; Auth.clearLink(); G.screen = "setpw"; return; }
-    if (G.screen === "setpw" || G.screen === "profile" || G.screen === "forgot") return;
+    if (Auth.link && Auth.link.type) Auth.clearLink();
+    if (Auth.s && Auth.s.pw && !Auth.s.expired) { G.linkType = Auth.s.pw; G.screen = "setpw"; return; } // password not chosen yet
+    if (G.screen === "profile" || G.screen === "forgot") return;
     if (!Auth.signedIn()) { G.screen = "signin"; return; }
     if (Auth.s.expired) { G.screen = "signin"; G.err = G.err || "Please sign in again. Your results are safe on this phone."; return; }
     const p = me();
@@ -2022,6 +2023,7 @@ const Gate = (() => {
       if (a !== b) { say("The two passwords don't match."); return; }
       const r = await Auth.api("/auth/v1/user", { method: "PUT", body: { password: a } }, await Auth.token());
       if (!r.ok) { say(r.status === 401 || r.status === 403 ? "This link has expired. Ask your programme lead to send a new invite." : (r.j && (r.j.msg || r.j.message)) || "The password couldn't be saved. Try again."); return; }
+      Auth.s.pw = null; Auth.keep();
       const p = await Auth.refreshProfile();
       if (!p) { say("Your password is saved, but your account wasn't found. Ask your programme lead to check your invite."); return; }
       say(); G.screen = p.status === "invited" ? "profile" : null; if (!G.screen) { say("", "Password saved."); location.reload(); }
