@@ -344,7 +344,7 @@ const KEY = Auth.uid() ? "step2read.u." + Auth.uid() : "step2read.signedout";
 (function startFresh() { // the pilot starts clean: practice data from before accounts is removed when someone signs in on this phone
   if (!Auth.uid()) return;
   try { const drop = []; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i);
-      if (k === LEGACY_KEY || k.startsWith(LEGACY_KEY + ":") || k === "step2read.ws" || k === "step2read.sync") drop.push(k); }
+      if (k === LEGACY_KEY || k.startsWith(LEGACY_KEY + ":") || k === "step2read.ws" || k === "step2read.sync" || k.startsWith(KEY + ":")) drop.push(k); } // KEY + ":…" = classes from the old example workspaces
     drop.forEach((k) => localStorage.removeItem(k)); } catch (e) {}
 })();
 
