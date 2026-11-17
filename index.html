@@ -229,6 +229,7 @@ code.k { font-family: var(--ui); background: var(--board-soft); padding: 1px 6px
 th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: top; } th { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
 .person { align-items: start; } .person .pa { justify-content: flex-end; } .editbox { margin-top: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); }
 .ck { display: inline-flex; gap: 6px; align-items: center; font-size: .85rem; } .ck input { width: auto; }
+@media (max-width: 480px) { .modechip:not(.admin) { display: none; } }
 @media (max-width: 560px) { .person { grid-template-columns: 1fr; } .person .pa { justify-content: flex-start; } .bar { grid-template-columns: 6.5rem 1fr 2rem; } }
 </style>
 
@@ -306,14 +307,16 @@ const Auth = (() => {
   async function refreshProfile() {
     if (!a) return null;
     const r = await rpc("s2r_me");
-    if (r.ok && r.j && r.j.user_id) { if (!a.user_id) a.user_id = r.j.user_id; a.profile = r.j; a.expired = false; keep(); return a.profile; }
+    if (r.ok && r.j && r.j.user_id) { if (!a.user_id) a.user_id = r.j.user_id; a.profile = r.j; a.expired = false;
+      if (r.j.school_code) { const s = await rpc("s2r_my_school"); if (s.ok && s.j && s.j.code) a.school = s.j; } else a.school = null;
+      keep(); return a.profile; }
     if (r.status === 401) { const t = await token(true); if (t) return refreshProfile(); }
     return null;
   }
   function signOut() { const t = a && a.access_token; if (t && navigator.onLine) api("/auth/v1/logout", { method: "POST" }, t); a = null; keep(); }
   return {
     get s() { return a; }, get link() { return link; }, clearLink() { link = null; },
-    signedIn: () => !!(a && a.access_token), profile: () => (a && a.profile) || null, uid: () => (a && a.user_id) || null,
+    signedIn: () => !!(a && a.access_token), profile: () => (a && a.profile) || null, school: () => (a && a.school) || null, uid: () => (a && a.user_id) || null,
     setSession, keep, token, api, rpc, get, fn, refreshProfile, signOut,
   };
 })();
@@ -332,17 +335,17 @@ const FLUENT_MOE = { G1: 35, G2: 65 };
 const UNIT_DOSE = { 0: 120, 1: 90, 2: 90, 3: 90, 4: 90, 5: 90, 6: 90, 7: 90, 8: 120, 9: 120, 10: 120, 11: 90, 12: 90, 13: 90,
   14: 180, 15: 90, 16: 90, 17: 90, 18: 120 };
 const BANDS = { 1: ["Sounds and blending", ["L0", "L1", "L2"]], 2: ["Word patterns", ["L3", "L4"]], 3: ["Fluency and meaning", ["L5", "L7"]] };
-const CYCLE = 10, CHECKS = [5, 10], CONSOLIDATION = 0.8, PRACTICE_W = 0.5, PARENT_EFF = 0.8, GAIN_BASE = 1.5, GAIN_CAP = 3;
+let CYCLE = 10, CHECKS = [5, 10]; // programme length in weeks (set per school) and the progress-check weeks
+function setCycle(w) { CYCLE = Math.max(2, Math.min(30, Math.round(+w) || 10)); CHECKS = CYCLE >= 4 ? [Math.round(CYCLE / 2), CYCLE] : [CYCLE]; }
+const TERM_WEEKS = 10, CONSOLIDATION = 0.8, PRACTICE_W = 0.5, PARENT_EFF = 0.8, GAIN_BASE = 1.5, GAIN_CAP = 3;
 const FORMS = ["A", "B", "C"];
 const LEGACY_KEY = "step2read.v1";
 const KEY = Auth.uid() ? "step2read.u." + Auth.uid() : "step2read.signedout";
-(function moveEarlierResults() { // results recorded before accounts existed go to the first person who signs in on this phone
+(function startFresh() { // the pilot starts clean: practice data from before accounts is removed when someone signs in on this phone
   if (!Auth.uid()) return;
-  try { if (localStorage.getItem("step2read.moved")) return;
-    const keys = []; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k === LEGACY_KEY || k.startsWith(LEGACY_KEY + ":")) keys.push(k); }
-    for (const k of keys) { const nk = KEY + k.slice(LEGACY_KEY.length); if (!localStorage.getItem(nk)) localStorage.setItem(nk, localStorage.getItem(k)); }
-    localStorage.setItem("step2read.moved", Auth.uid());
-  } catch (e) {}
+  try { const drop = []; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i);
+      if (k === LEGACY_KEY || k.startsWith(LEGACY_KEY + ":") || k === "step2read.ws" || k === "step2read.sync") drop.push(k); }
+    drop.forEach((k) => localStorage.removeItem(k)); } catch (e) {}
 })();
 
 // letter -> unit (for gap units from the letter inventory)
@@ -397,7 +400,7 @@ const Sync = (() => {
       learners: d.learners.map((l) => ({ id: l.id, name: l.name || "", assessments: (l.assessments || []).map((a) => ({
         id: a.id, date: a.date, form: a.form, grade: a.grade, level: a.level, startUnit: a.startUnit, wcpm: a.wcpm || 0,
         acc: a.acc ?? "", comp: a.comp ?? "", gaps: a.gaps || [], diagnosed: !!a.diagnosed, source: a.source || "school" })) })),
-      homeLog: d.homeLog || [] };
+      weeks: CYCLE, homeLog: d.homeLog || [] };
   }
   const sig = (o) => { const t = JSON.stringify(o); let h = 0; for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return t.length + ":" + h; };
   function pending() { let n = 0; for (const [id, d] of stores()) { const p = payload(id, d); if (p && meta.sent[meta.device + ":" + id] !== sig(p)) n++; } return n; }
@@ -515,7 +518,7 @@ function horizon(start, grade, wcpm, eff, days, levels, gapUnits) {
   let remaining = 0; for (let u = start; u <= t.unit; u++) remaining += dose(u, levels, gapUnits);
   let weeks = weekly ? remaining / weekly : Infinity;
   if (t.wcpm) { const g = gainPerWeek(eff, days); const s = wcpm + 0.5 * g * weeks; if (s < t.wcpm) weeks += g ? (t.wcpm - s) / g : Infinity; }
-  return weeks / CYCLE;
+  return weeks / TERM_WEEKS;
 }
 function fluencyOnly(levels) { return [...levels].length > 0 && [...levels].every((l) => l === "L5" || l === "L7"); }
 function median(a) { const b = [...a].sort((x, y) => x - y); const m = Math.floor(b.length / 2); return b.length % 2 ? b[m] : (b[m - 1] + b[m]) / 2; }
@@ -533,8 +536,8 @@ function planGroup(title, learners, grade, mode, minutes, days, bands, band) {
   const fluency = fluencyOnly(levels) || !units.length;
   return {
     title, learnerIds: learners.map((l) => l.id), levels: [...levels].sort(), eff: Math.round(eff * 10) / 10, start, flagged,
-    weeks: fluencyOnly(levels) ? weeks.map(() => ({ t: "f" })) : weeks, sec5: securedBy(5), sec10: securedBy(10), wcpmNow: w0,
-    wcpm5: Math.round(w0 + gain * (fluency ? 5 : 2.5)), wcpm10: Math.round(w0 + gain * (fluency ? 10 : 5)), fluency,
+    weeks: fluencyOnly(levels) ? weeks.map(() => ({ t: "f" })) : weeks, sec5: securedBy(CHECKS[0]), sec10: securedBy(CYCLE), wcpmNow: w0,
+    wcpm5: Math.round(w0 + gain * (fluency ? CHECKS[0] : CHECKS[0] / 2)), wcpm10: Math.round(w0 + gain * (fluency ? CYCLE : CYCLE / 2)), fluency,
     compFocus: learners.filter((l) => (l.level === "L5" || l.level === "L7") && l.comp <= 3).length >= Math.max(1, Math.floor(learners.length / 2)),
     terms: Math.round(horizon(start, grade, w0, eff, days, levels, gapUnits) * 10) / 10,
   };
@@ -565,7 +568,7 @@ function makePlan() {
     for (const g of groups) if (g.learnerIds.length > 15) warnings.push(`${g.title} has ${g.learnerIds.length} learners. Split it if a second adult can help.`);
   }
   const keep = S.plan && S.plan.start && (Date.now() - new Date(S.plan.start + "T00:00:00").getTime()) < CYCLE * 7 * 864e5;
-  S.plan = { v: 2, start: keep ? S.plan.start : today(), made: today(), grade, minutes, days, groups, atLevel, warnings };
+  S.plan = { v: 2, weeks: CYCLE, start: keep ? S.plan.start : today(), made: today(), grade, minutes, days, groups, atLevel, warnings };
   save();
 }
 
@@ -700,7 +703,7 @@ function vWelcome() {
   <div class="hero-l"><div class="stack-s">
     <p class="label">Foundational reading · PP1 to Grade 6</p>
     <h1>Find each child's step on the reading ladder, then teach the next one.</h1>
-    <p class="muted">A short reading check places every child on one of eight levels, matched to the CBE English designs. Step2Read then builds a paced 10-week plan with ready-to-use lessons, cards and stories.</p>
+    <p class="muted">A short reading check places every child on one of eight levels, matched to the CBE English designs. Step2Read then builds a paced plan for the weeks your programme runs, with ready-to-use lessons, cards and stories.</p>
   </div><div class="mini" aria-hidden="true">${rungs}</div></div>
   <div class="grid2">
     <button class="card btn" data-act="mode" data-v="teacher" style="justify-content:flex-start;text-align:left;display:grid;gap:6px">
@@ -713,13 +716,12 @@ function vWelcome() {
       <li><b>Check:</b> the child reads letters, words and a short story from your phone while you tap right or wrong (2–10 minutes).</li>
       <li><b>Plan:</b> Step2Read places the child on the ladder and paces the units to your time.</li>
       <li><b>Teach:</b> open today's lesson; show the cards and stories on the phone or write them on the board.</li>
-      <li><b>Re-check:</b> at weeks 5 and 10, a new version of the check shows real progress.</li>
+      <li><b>Re-check:</b> halfway through and at the end of the programme, a new version of the check shows real progress.</li>
     </ol></div>
   <button class="card btn" data-go="paste" style="justify-content:flex-start;text-align:left;display:grid;gap:4px">
     <span class="label">For parents</span><h3>I have a code from my child's teacher</h3><span class="muted small" style="font-weight:400">Link to your child's class: home practice that matches what they learn at school each day.</span></button>
-  <div class="stack-s"><p class="label">Or explore an example</p>
-    ${Object.entries(EXAMPLES).map(([k, x]) => `<button class="btn ghost" style="justify-content:flex-start" data-act="example" data-v="${k}">${esc(x.label)} →</button>`).join("")}
-    <button class="btn ghost" style="justify-content:flex-start" data-act="example" data-v="p">A parent linked to the Grade 2 class →</button></div>
+  ${(Auth.profile() || {}).role === "super_admin" ? `<div class="stack-s"><p class="label">Demo (only you see this)</p>
+    <button class="btn ghost" style="justify-content:flex-start" data-act="example" data-v="g2">${esc(EXAMPLES.g2.label)} →</button></div>` : ""}
   <p class="muted small">Results are saved on this phone first, so everything works offline. When you are online they are sent securely to your programme.</p>
   ${BUILD_MODE ? `<button class="btn ghost" style="justify-content:flex-start" data-act="adminOn">Super admin (build mode): open both portals →</button>` : ""}
 </div>`;
@@ -737,6 +739,8 @@ function vSetup() {
     ${p ? `<label class="f">Child's name<input id="f_child" required value="${esc((S.learners[0] || {}).name || "")}" placeholder="e.g. Amani"></label>`
         : `<label class="f">School<input id="f_school" value="${esc(s.school || "")}" placeholder="e.g. Upendo Academy"></label>${(Auth.profile() || {}).school_code ? `<p class="small muted">Results from this class are reported under <b>${esc(Auth.profile().school_code)}</b>.</p>` : ""}`}
     <label class="f">${p ? "Child's grade" : "Class grade"}<select id="f_grade">${gradeOpts}</select></label>
+    ${Gate.weeks() ? `<p class="small muted">Programme length: <b>${Gate.weeks()} weeks</b>, set by your school. Progress checks fall in week ${CHECKS[0]} and week ${CYCLE}.</p>`
+      : `<label class="f">Programme length (weeks)<input id="f_weeks" type="number" min="2" max="30" inputmode="numeric" value="${s.weeks || CYCLE}"></label>`}
     <div class="grid2">
       <label class="f">Minutes a day<select id="f_min">${mins.map((m) => `<option ${m === dm ? "selected" : ""}>${m}</option>`).join("")}</select></label>
       <label class="f">Days a week<select id="f_days">${[1, 2, 3, 4, 5].map((d) => `<option ${d === (s.days || 5) ? "selected" : ""}>${d}</option>`).join("")}</select></label>
@@ -760,7 +764,7 @@ function nextAction() {
   if (!n) return { t: "Add your learners", b: "Add the names of the children you teach.", a: "editSetup", l: "Add learners" };
   if (assessed < n) return { t: isParent() ? `Check ${esc(S.learners[0].name)}'s reading` : `${n - assessed} learner${n - assessed > 1 ? "s" : ""} still to check`,
     b: isParent() ? "About 10 minutes. Sit together with the phone between you." : "Each check takes 2–3 minutes, plus a few minutes of diagnostic.", a: "pickAssess", l: "Start a check" };
-  if (!S.plan) return { t: "Make the 10-week plan", b: "Everyone is checked. Step2Read will group, sequence and pace the work.", a: "makePlan", l: "Make the plan" };
+  if (!S.plan) return { t: `Make the ${CYCLE}-week plan`, b: "Everyone is checked. Step2Read will group, sequence and pace the work.", a: "makePlan", l: "Make the plan" };
   const w = weekOfPlan();
   const pend = isParent() ? [] : S.learners.filter((l) => pendingChecks(l).length);
   if (pend.length) return { t: `${pend.length} home check${pend.length > 1 ? "s" : ""} to review`, b: "A parent ran a reading check at home. Accept the new level or keep the school level, so home and school stay on one plan.", a: "reviewHome", l: "Review" };
@@ -793,7 +797,7 @@ function vHome() {
   ${S.plan ? `<div class="card stack-s"><div class="row between"><h3>Plan · week ${weekOfPlan()} of 10</h3><button class="btn ghost" data-go="plan">View</button></div>${weeksStrip()}</div>` : ""}
 </div>`;
 }
-function weeksStrip() { const w = weekOfPlan(); return `<div class="weeks">${Array.from({ length: 10 }, (_, i) => `<span class="${i + 1 === w ? "now" : ""} ${CHECKS.includes(i + 1) ? "chk" : ""}">W${i + 1}</span>`).join("")}</div>
+function weeksStrip() { const w = weekOfPlan(); return `<div class="weeks">${Array.from({ length: CYCLE }, (_, i) => `<span class="${i + 1 === w ? "now" : ""} ${CHECKS.includes(i + 1) ? "chk" : ""}">W${i + 1}</span>`).join("")}</div>
   <p class="small muted">Boxed weeks are progress checks.</p>`; }
 
 // -- learners
@@ -979,11 +983,11 @@ function levelBlurb(l) { return { L0: "Still learning to hear sounds in words an
 // -- plan
 function vPlan() {
   if (!S.plan) return `<div class="stack"><h1>Plan</h1><div class="card stack-s"><p class="muted">${S.learners.filter(latest).length ? "Ready when you are." : "Check at least one learner first."}</p>
-    <div><button class="btn primary" data-act="makePlan" ${S.learners.filter(latest).length ? "" : "disabled"}>Make the 10-week plan</button></div></div></div>`;
+    <div><button class="btn primary" data-act="makePlan" ${S.learners.filter(latest).length ? "" : "disabled"}>Make the ${CYCLE}-week plan</button></div></div></div>`;
   const P = S.plan; const w = weekOfPlan(); const name = (id) => esc((S.learners.find((l) => l.id === id) || {}).name || "");
   const gEnd = GRADE_END[P.grade];
   return `<div class="stack">
-  <div class="row between"><div><p class="label">Started ${fmtDate(P.start)} · ${P.minutes} min × ${P.days} days</p><h1>10-week plan</h1></div>${P.linked ? "" : `<button class="btn" data-act="makePlan">Update plan</button>`}</div>
+  <div class="row between"><div><p class="label">Started ${fmtDate(P.start)} · ${P.minutes} min × ${P.days} days</p><h1>${P.weeks || CYCLE}-week plan</h1></div>${P.linked ? "" : `<button class="btn" data-act="makePlan">Update plan</button>`}</div>
   ${P.linked ? `<p class="small banner info">This is ${esc(S.learners[0].name)}'s school plan, set by ${esc(S.link.tn || "the teacher")}. Home practice follows it week by week.</p>` : ""}
   ${weeksStrip()}
   ${P.warnings.map((x) => `<div class="banner small">${esc(x)}</div>`).join("")}
@@ -992,14 +996,14 @@ function vPlan() {
     ${isParent() ? "" : `<p class="small">${g.learnerIds.map(name).join(", ")}</p>`}
     ${g.flagged.length ? `<p class="small banner">Extra support (start below the group): ${g.flagged.map(name).join(", ")}. Give them the home plan or a few minutes one-to-one.</p>` : ""}
     <div class="grid2">
-      <div class="card flat"><p class="label">Week 5 target</p><b>${g.fluency ? `${g.wcpm5} words a minute` : g.sec5 !== null ? `Secure to Unit ${g.sec5}` : `Working on Unit ${g.start}`}</b></div>
-      <div class="card flat"><p class="label">Week 10 target</p><b>${g.fluency ? `${g.wcpm10} words a minute` : g.sec10 !== null ? `Secure to Unit ${g.sec10}` : `Working on Unit ${g.start}`}</b></div>
+      <div class="card flat"><p class="label">Week ${CHECKS[0]} target</p><b>${g.fluency ? `${g.wcpm5} words a minute` : g.sec5 !== null ? `Secure to Unit ${g.sec5}` : `Working on Unit ${g.start}`}</b></div>
+      <div class="card flat"><p class="label">Week ${CYCLE} target</p><b>${g.fluency ? `${g.wcpm10} words a minute` : g.sec10 !== null ? `Secure to Unit ${g.sec10}` : `Working on Unit ${g.start}`}</b></div>
     </div>
     <div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:.85rem"><tbody>
       ${g.weeks.map((e, i) => { const wp = weekPlan(g, i + 1); return `<tr style="border-bottom:1px solid var(--line);${i + 1 === w ? "background:var(--maize-soft)" : ""}"><td style="padding:6px 8px;white-space:nowrap;font-weight:600;vertical-align:top">Week ${i + 1}${CHECKS.includes(i + 1) ? " ✓" : ""}</td>
         <td style="padding:6px 8px">${esc(wp.label)}${wp.patterns.length && wp.t === "u" ? `<div class="small muted">${esc(listS(wp.patterns))}</div>` : ""}</td></tr>`; }).join("")}
     </tbody></table></div>
-    ${isParent() ? `<p class="small muted">Goal for this term: ${g.fluency ? `reach ${g.wcpm10} words a minute` : `secure Unit ${g.sec10 ?? g.start}`}. Every extra 5 minutes a day brings ${GRADE_LABEL[P.grade]} level closer.</p>`
+    ${isParent() ? `<p class="small muted">Goal by the end of the programme: ${g.fluency ? `reach ${g.wcpm10} words a minute` : `secure Unit ${g.sec10 ?? g.start}`}. Every extra 5 minutes a day brings ${GRADE_LABEL[P.grade]} level closer.</p>`
       : `<p class="small muted">At this pace, ${GRADE_LABEL[P.grade]} level (Unit ${gEnd.unit}${gEnd.wcpm ? `, ${gEnd.wcpm} words a minute` : ""}) is about <b>${isFinite(g.terms) ? g.terms : "many"} term${g.terms === 1 ? "" : "s"}</b> away.${g.compFocus ? " Comprehension is a focus for most of this group." : ""}</p>`}
   </div>`).join("")}
   ${P.atLevel.length ? `<div class="card"><h3>At grade level</h3><p class="small">${P.atLevel.map(name).join(", ")}: independent reading during the block.</p></div>` : ""}
@@ -1321,7 +1325,7 @@ function vSession() {
   const w = S.ui.week || weekOfPlan(); const dow = new Date().getDay(); const day = S.ui.day || (dow >= 1 && dow <= 5 ? dow : 1);
   const G = S.plan.groups; const wp = G.map((g) => weekPlan(g, w)); const D = wp.map((p) => p.days[day - 1]); const M = S.plan.minutes;
   const head = `<div class="row between"><div><p class="label">Week ${w} · Day ${day}${CHECKS.includes(w) && day === 1 ? " · progress check week" : ""}</p><h1>${isParent() ? "Today at home" : "Today's session"}</h1></div>
-    <select id="weekSel" aria-label="Week" style="width:auto">${Array.from({ length: 10 }, (_, i) => `<option value="${i + 1}" ${i + 1 === w ? "selected" : ""}>Week ${i + 1}</option>`).join("")}</select></div>`;
+    <select id="weekSel" aria-label="Week" style="width:auto">${Array.from({ length: CYCLE }, (_, i) => `<option value="${i + 1}" ${i + 1 === w ? "selected" : ""}>Week ${i + 1}</option>`).join("")}</select></div>`;
   const week = `<div class="card stack-s"><div class="row between"><h2>This week</h2><span class="small muted">Tap a day</span></div>
     ${isParent() ? `<p class="small"><b>${esc(wp[0].label)}</b></p>` : wp.map((p, i) => `<p class="small"><b>Band ${G[i].band}:</b> ${esc(p.label)}</p>`).join("")}
     ${weekGrid(G, day, wp)}
@@ -1774,7 +1778,7 @@ const Gate = (() => {
   function vLoading() { return `<div class="card stack-s"><h2>Signing you in…</h2><p class="muted">One moment.</p></div>`; }
   function vSignin() {
     return `<form class="stack auth" id="g_signin" novalidate>
-      <div class="stack-s"><p class="label">Step2Read · Holiday reading programme</p><h1>Sign in</h1><p class="muted">Use the phone number and password you set up from your invite email.</p></div>
+      <div class="stack-s"><p class="label">Step2Read · Reading programme</p><h1>Sign in</h1><p class="muted">Use the phone number and password you set up from your invite email.</p></div>
       ${note()}
       <div class="card stack">
         <label class="f">Phone number<input id="g_phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="e.g. 0712 345 678" required data-autofocus></label>
@@ -1842,13 +1846,14 @@ const Gate = (() => {
     if (!navigator.onLine) { G.data = G.data || { offline: true }; draw(); return; }
     G.loading = true; draw();
     const [people, schools, summary, learners] = await Promise.all([
-      Auth.rpc("s2r_people"), Auth.get("s2r_schools?select=code,name,active&order=code"),
-      Auth.get("s2r_summary?select=*"), Auth.get("s2r_learners?select=*&order=school_code,facilitator,child_name"),
+      Auth.rpc("s2r_people"), Auth.get("s2r_schools?select=code,name,active,weeks&order=code"),
+      Promise.resolve({ ok: true }), Auth.get("s2r_learners?select=*&order=school_code,facilitator,child_name"),
     ]);
     G.loading = false;
     const bad = [people, schools, summary, learners].find((r) => !r.ok);
     if (bad) { if (bad.status === 401) { await Auth.token(true); } G.data = { error: bad.offline ? "Couldn't reach the programme database. Check the internet and tap Refresh." : "The programme data couldn't load. Tap Refresh to try again." }; draw(); return; }
-    G.data = { people: people.j || [], schools: schools.j || [], summary: summary.j || [], learners: learners.j || [], at: new Date().toISOString() };
+    G.data = { people: people.j || [], schools: schools.j || [], allLearners: learners.j || [], at: new Date().toISOString() };
+    scope();
     draw();
   }
   function vPortal() {
@@ -1865,9 +1870,22 @@ const Gate = (() => {
     return `<div class="stack">
       <div class="row" style="justify-content:space-between;align-items:flex-end"><div class="stack-s"><p class="label">${ROLE_LABEL[p.role]} · ${scope}</p><h1>Programme portal</h1></div>
         <div class="row"><button class="btn mat" data-g="refresh" ${G.loading ? "disabled" : ""}>${G.loading ? "Refreshing…" : "Refresh"}</button><button class="btn mat primary" data-g="toApp">Open the reading app</button></div></div>
+      ${sup && D.hasDemo ? `<div class="${G.demo ? "banner" : "banner info"} row" style="justify-content:space-between"><span class="small">${G.demo ? "<b>Demo mode.</b> Showing the example class only. Real programme results are hidden." : "A demo class is available for presentations. It is never counted in programme results and only you can see it."}</span><button class="btn mat ${G.demo ? "" : "maize"}" data-g="demo">${G.demo ? "Exit demo" : "Show demo class"}</button></div>` : ""}
       <nav class="ptabs" aria-label="Portal sections">${tabs.map(([k, l]) => `<button data-g="tab" data-v="${k}" ${G.tab === k ? 'aria-current="page"' : ""}>${l}</button>`).join("")}</nav>
       ${note()}${body}
       ${D.at ? `<p class="small muted">Updated ${fmt(D.at)}. Each class shows its results as of its phone's last sync.</p>` : ""}</div>`;
+  }
+  // The demo class (school code DEMO, super admin only) never mixes with real programme numbers.
+  function scope() {
+    const D = G.data; if (!D || !D.allLearners) return;
+    D.hasDemo = D.allLearners.some((l) => l.school_code === "DEMO");
+    D.learners = D.allLearners.filter((l) => (G.demo ? l.school_code === "DEMO" : l.school_code !== "DEMO"));
+    const agg = (rows, code) => { const re = rows.filter((r) => r.checks >= 2), up = re.filter((r) => r.levels_gained >= 1);
+      return { school_code: code, classes: new Set(rows.map((r) => r.class_id)).size, children: rows.length, with_baseline: rows.filter((r) => r.checks >= 1).length,
+        rechecked: re.length, moved_up: up.length, moved_up_pct: re.length ? Math.round((100 * up.length) / re.length) : null,
+        avg_levels_gained: re.length ? Math.round((10 * re.reduce((s, r) => s + r.levels_gained, 0)) / re.length) / 10 : null }; };
+    const codes = [...new Set(D.learners.map((l) => l.school_code))].sort();
+    D.summary = codes.map((c) => agg(D.learners.filter((l) => l.school_code === c), c)).concat([agg(D.learners, null)]);
   }
   const pct = (a, b) => (b ? Math.round((100 * a) / b) + "%" : "–");
   function pOverview(D) {
@@ -1879,8 +1897,10 @@ const Gate = (() => {
     const lv = {}; for (const l of D.learners) if (l.latest_level) lv[l.latest_level] = (lv[l.latest_level] || 0) + 1;
     const maxLv = Math.max(1, ...Object.values(lv));
     const stat = (n, l, sub) => `<div class="card stat"><b>${n ?? 0}</b><span>${l}</span>${sub ? `<small class="muted">${sub}</small>` : ""}</div>`;
-    return `<div class="stats">
-        ${stat(tot.children, "Children registered", `${tot.classes || 0} classes`)}
+    const p = me(); const mySchool = p.role === "school_admin" ? D.schools.find((s) => s.code === p.school_code) : null;
+    return `${mySchool && !G.demo ? weeksCard(mySchool, "Programme length", "How many weeks your school will run the programme. Facilitators' plans, progress checks and targets adjust to it.") : ""}
+      <div class="stats">
+        ${stat(tot.children, "Children registered", `${tot.classes || 0} class${tot.classes === 1 ? "" : "es"}`)}
         ${stat(tot.with_baseline, "Baseline checked", pct(tot.with_baseline, tot.children) + " of children")}
         ${stat(tot.rechecked, "Re-checked", pct(tot.rechecked, tot.children) + " of children")}
         ${stat(tot.moved_up_pct != null ? tot.moved_up_pct + "%" : "–", "Moved up a level", `of re-checked · avg ${tot.avg_levels_gained ?? "–"} levels`)}
@@ -1892,8 +1912,8 @@ const Gate = (() => {
         ${rows.length ? `<div class="tw"><table><thead><tr><th>School</th><th>Classes</th><th>Children</th><th>Baseline</th><th>Re-checked</th><th>Moved up</th><th>Avg gain</th></tr></thead><tbody>
         ${rows.map((r) => `<tr><td><b>${esc(r.school_code)}</b></td><td>${r.classes}</td><td>${r.children}</td><td>${r.with_baseline}</td><td>${r.rechecked}</td><td>${r.moved_up_pct != null ? r.moved_up_pct + "%" : "–"}</td><td>${r.avg_levels_gained ?? "–"}</td></tr>`).join("")}</tbody></table></div>`
           : `<p class="muted small">Nothing has synced yet. Schools appear here once their facilitators' phones send results.</p>`}</div>
-      <div class="card stack-s"><h3>Facilitators</h3><p>${active} active · ${invited} invited, not yet set up</p>
-        ${stale.length ? `<p class="small"><span class="hb warn">Check in</span> No sync in 3 days: ${stale.map((x) => esc(x.full_name)).join(", ")}</p>` : ""}</div>`;
+      ${G.demo ? "" : `<div class="card stack-s"><h3>Facilitators</h3><p>${active} active · ${invited} invited, not yet set up</p>
+        ${stale.length ? `<p class="small"><span class="hb warn">Check in</span> No sync in 3 days: ${stale.map((x) => esc(x.full_name)).join(", ")}</p>` : ""}</div>`}`;
   }
   function pResults(D, p) {
     const schools = [...new Set(D.learners.map((l) => l.school_code))].sort();
@@ -1949,13 +1969,22 @@ const Gate = (() => {
         ${sup && G.edit !== x.user_id ? `<button class="btn mat" data-g="edit" data-id="${x.user_id}">Change access</button>` : ""}
         ${x.status === "disabled" ? `<button class="btn mat" data-g="status" data-v="active" data-id="${x.user_id}">Switch on</button>` : `<button class="btn mat danger" data-g="status" data-v="disabled" data-id="${x.user_id}">Switch off</button>`}` : ""}</div></div>`;
   }
+  function weeksCard(s, title, help) {
+    return `<form class="card stack-s g_weeks" data-code="${esc(s.code)}" novalidate><h3>${esc(title)}</h3><p class="small muted">${esc(help)}</p>
+      <div class="row"><label class="f" style="max-width:9rem">Weeks<input type="number" name="weeks" min="2" max="30" step="1" value="${s.weeks || 10}" inputmode="numeric"></label>
+      <button class="btn primary mat" style="align-self:end" ${G.busy ? "disabled" : ""}>Save</button></div>
+      <p class="small muted">Progress checks fall in week ${Math.round((s.weeks || 10) / 2)} and week ${s.weeks || 10}.</p></form>`;
+  }
   function pSchools(D) {
     const count = (c) => D.people.filter((x) => x.school_code === c && x.role === "facilitator").length;
     return `<form class="card stack-s" id="g_school" novalidate><h3>Add a school</h3>
       <div class="grid2"><label class="f">School code<input id="s_code" placeholder="e.g. SSDT" autocapitalize="characters" style="text-transform:uppercase" required></label><label class="f">School name<input id="s_name" placeholder="e.g. St. Scholastica Day" required></label></div>
-      <p class="small muted">The code is a short label used in reports. Use 2 to 20 letters or numbers.</p>
+      <label class="f" style="max-width:12rem">Programme length (weeks)<input id="s_weeks" type="number" min="2" max="30" value="10" inputmode="numeric"></label>
+      <p class="small muted">The code is a short label used in reports. Use 2 to 20 letters or numbers. The school admin can change the programme length later.</p>
       <div class="row"><button class="btn primary" ${G.busy ? "disabled" : ""}>Add school</button></div></form>
-      <div class="card"><div class="list">${D.schools.map((s) => `<div class="li"><div><div class="name">${esc(s.code)} · ${esc(s.name)}</div><div class="small muted">${count(s.code)} facilitators</div></div></div>`).join("") || `<p class="muted">No schools yet.</p>`}</div></div>`;
+      <div class="card"><div class="list">${D.schools.map((s) => `<div class="li person"><div style="min-width:0"><div class="name">${esc(s.code)} · ${esc(s.name)}</div><div class="small muted">${count(s.code)} facilitators · ${s.weeks || 10}-week programme</div>
+        ${G.edit === "s:" + s.code ? weeksCard(s, "Programme length", "Facilitators' plans at this school adjust to it.") : ""}</div>
+        <div class="row pa">${G.edit === "s:" + s.code ? `<button class="btn ghost mat" data-g="editClose">Close</button>` : `<button class="btn mat" data-g="edit" data-id="s:${esc(s.code)}">Programme length</button>`}</div></div>`).join("") || `<p class="muted">No schools yet.</p>`}</div></div>`;
   }
 
   // ---------------------------------------------------------------- actions
@@ -1988,6 +2017,7 @@ const Gate = (() => {
     signOut: () => { Auth.signOut(); setView("portal"); location.reload(); },
     tab: (el) => { G.tab = el.dataset.v; G.edit = null; say(); draw(); },
     refresh: () => { say(); loadData(true); },
+    demo: () => { G.demo = !G.demo; G.filter = ""; scope(); say(); draw(); window.scrollTo(0, 0); },
     inviteOpen: () => { G.inviteOpen = true; say(); draw(); },
     inviteClose: () => { G.inviteOpen = false; say(); draw(); },
     edit: (el) => { G.edit = el.dataset.id; say(); draw(); },
@@ -1998,7 +2028,7 @@ const Gate = (() => {
     csv: async (el) => {
       if (el.dataset.v === "learners") { const L = G.data.learners.filter((l) => !G.filter || l.school_code === G.filter); download(`step2read-children-${today()}.csv`, csv(L)); return; }
       el.disabled = true; el.textContent = "Preparing…";
-      const r = await Auth.get("s2r_checks?select=school_code,facilitator,school,child_id,child_name,check_date,form,grade,level,words_per_minute,accuracy_pct,comprehension,full_diagnostic,source,gap_units&order=school_code,facilitator,child_name,check_date" + (G.filter ? "&school_code=eq." + encodeURIComponent(G.filter) : ""));
+      const r = await Auth.get("s2r_checks?select=school_code,facilitator,school,child_id,child_name,check_date,form,grade,level,words_per_minute,accuracy_pct,comprehension,full_diagnostic,source,gap_units&order=school_code,facilitator,child_name,check_date" + (G.filter ? "&school_code=eq." + encodeURIComponent(G.filter) : G.demo ? "&school_code=eq.DEMO" : "&school_code=neq.DEMO"));
       if (r.ok) download(`step2read-checks-${today()}.csv`, csv(r.j || [])); else say("The download couldn't be prepared. Try again.");
       draw();
     },
@@ -2048,11 +2078,18 @@ const Gate = (() => {
     }),
     g_school: () => busy(async () => {
       const r = await Auth.rpc("s2r_create_school", { p_code: val("s_code"), p_name: val("s_name") });
-      if (r.j && r.j.ok) { say("", `School ${r.j.code} added.`); await loadData(true); } else say((r.j && r.j.error) || "The school couldn't be added.");
+      if (r.j && r.j.ok) { const wk = +val("s_weeks") || 10; if (wk !== 10) await Auth.rpc("s2r_set_school_weeks", { p_code: r.j.code, p_weeks: wk });
+        say("", `School ${r.j.code} added.`); await loadData(true); } else say((r.j && r.j.error) || "The school couldn't be added.");
     }),
   };
   document.addEventListener("click", (e) => { const el = e.target.closest("[data-g]"); if (!el || !clicks[el.dataset.g]) return; e.preventDefault(); e.stopPropagation(); clicks[el.dataset.g](el); }, true);
-  document.addEventListener("submit", (e) => { if (!forms[e.target.id]) return; e.preventDefault(); e.stopImmediatePropagation(); forms[e.target.id](e.target); }, true);
+  document.addEventListener("submit", (e) => {
+    if (e.target.classList && e.target.classList.contains("g_weeks")) { e.preventDefault(); e.stopImmediatePropagation(); const f = e.target;
+      const wk = +f.querySelector("[name=weeks]").value;
+      busy(async () => { const r = await Auth.rpc("s2r_set_school_weeks", { p_code: f.dataset.code, p_weeks: wk });
+        if (r.j && r.j.ok) { G.edit = null; say("", `Programme length set to ${wk} weeks. Facilitators' plans update the next time they open Step2Read online.`); await loadData(true); }
+        else say((r.j && r.j.error) || "That didn't save. Try again."); }); return; }
+    if (!forms[e.target.id]) return; e.preventDefault(); e.stopImmediatePropagation(); forms[e.target.id](e.target); }, true);
   document.addEventListener("change", (e) => {
     const t = e.target;
     if (t.id === "g_filter") { G.filter = t.value; draw(); }
@@ -2066,11 +2103,13 @@ const Gate = (() => {
     route();
     if (Auth.signedIn() && navigator.onLine) {
       const before = JSON.stringify(me());
-      Auth.refreshProfile().then(() => { if (JSON.stringify(me()) !== before || Auth.s && Auth.s.expired) { if (["portal", null, "loading", "blocked"].includes(G.screen)) { G.screen = null; } render(); } });
+      Auth.refreshProfile().then(() => { const sw = Auth.school() && Auth.school().weeks;
+        if (sw && sw !== CYCLE) { setCycle(sw); if (S.plan && S.learners.some(latest)) { try { makePlan(); } catch (e) {} } if (!G.screen) render(); }
+        if (JSON.stringify(me()) !== before || Auth.s && Auth.s.expired) { if (["portal", null, "loading", "blocked"].includes(G.screen)) { G.screen = null; } render(); } });
     }
     render();
   }
-  return { takeover, start, paintChips, draw, route, get screen() { return G.screen; } };
+  return { takeover, start, paintChips, draw, route, weeks: () => (Auth.school() && Auth.school().weeks) || null, get screen() { return G.screen; } };
 })();
 
 // ------------------------------------------------------------------ events
@@ -2160,9 +2199,11 @@ document.addEventListener("submit", (e) => {
   if (p) { const nm = v("f_child").trim() || "My child"; if (S.learners[0]) S.learners[0].name = nm; else S.learners = [{ id: uid(), name: nm, assessments: [] }]; }
   else { const names = v("f_names").split("\n").map((x) => x.trim()).filter(Boolean); const keep = Object.fromEntries(S.learners.map((l) => [l.name, l]));
     S.learners = names.map((n) => keep[n] || { id: uid(), name: n, assessments: [] }); }
+  if (!Gate.weeks()) { S.setup.weeks = Math.max(2, Math.min(30, +v("f_weeks") || 10)); setCycle(S.setup.weeks); if (S.plan && S.learners.some(latest)) makePlan(); }
   save(); go("home");
 });
-if (S.plan && S.plan.v !== 2 && S.learners.some(latest)) { try { makePlan(); } catch (e) {} }
+setCycle(Gate.weeks() || (S.setup && S.setup.weeks) || 10);
+if (S.plan && (S.plan.v !== 2 || (S.plan.weeks || 10) !== CYCLE) && !(S.link && S.mode === "parent") && S.learners.some(latest)) { try { makePlan(); } catch (e) {} }
 try { const c = new URLSearchParams(location.search).get("code"); if (c) S.ui = { screen: "paste", pre: "S2R-" + c }; } catch (e) {}
 Gate.start();
 Sync.run(false);
