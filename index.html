@@ -1975,16 +1975,32 @@ const Gate = (() => {
       <button class="btn primary mat" style="align-self:end" ${G.busy ? "disabled" : ""}>Save</button></div>
       <p class="small muted">Progress checks fall in week ${Math.round((s.weeks || 10) / 2)} and week ${s.weeks || 10}.</p></form>`;
   }
+  function deleteCard(s, D) {
+    const people = D.people.filter((x) => x.school_code === s.code);
+    const rows = (D.allLearners || []).filter((l) => l.school_code === s.code);
+    const classes = new Set(rows.map((l) => l.class_id)).size;
+    return `<form class="card stack-s editbox" id="g_delschool" data-code="${esc(s.code)}" novalidate style="border-color:var(--margin)">
+      <h3>Delete ${esc(s.code)} · ${esc(s.name)}?</h3>
+      <p class="small">This permanently removes:</p>
+      <ul class="small" style="margin:0;padding-left:1.2em">
+        <li><b>${people.length}</b> ${people.length === 1 ? "person's account" : "people's accounts"} at this school${people.length ? ` (${people.map((x) => esc(x.full_name)).join(", ")}). They will no longer be able to sign in` : ""}</li>
+        <li><b>${classes}</b> ${classes === 1 ? "class" : "classes"} and the results of <b>${rows.length}</b> ${rows.length === 1 ? "child" : "children"}</li>
+        <li>the school from any Linchpin admin's list</li></ul>
+      <p class="small"><b>This cannot be undone.</b> Download the results first (Results tab → CSV) if you may need them.</p>
+      <label class="f">Type <b>${esc(s.code)}</b> to confirm<input id="del_confirm" autocomplete="off" autocapitalize="characters" style="text-transform:uppercase"></label>
+      <div class="row"><button class="btn danger" ${G.busy ? "disabled" : ""}>Delete permanently</button><button type="button" class="btn ghost" data-g="editClose">Cancel</button></div></form>`;
+  }
   function pSchools(D) {
     const count = (c) => D.people.filter((x) => x.school_code === c && x.role === "facilitator").length;
     return `<form class="card stack-s" id="g_school" novalidate><h3>Add a school</h3>
-      <div class="grid2"><label class="f">School code<input id="s_code" placeholder="e.g. SSDT" autocapitalize="characters" style="text-transform:uppercase" required></label><label class="f">School name<input id="s_name" placeholder="e.g. St. Scholastica Day" required></label></div>
+      <label class="f">School name<input id="s_name" placeholder="e.g. St. Scholastica Day School" required></label>
       <label class="f" style="max-width:12rem">Programme length (weeks)<input id="s_weeks" type="number" min="2" max="30" value="10" inputmode="numeric"></label>
-      <p class="small muted">The code is a short label used in reports. Use 2 to 20 letters or numbers. The school admin can change the programme length later.</p>
+      <p class="small muted">A short code for reports is created automatically from the school's initials (for example St. Scholastica Day School becomes SSDS). The school admin can change the programme length later.</p>
       <div class="row"><button class="btn primary" ${G.busy ? "disabled" : ""}>Add school</button></div></form>
       <div class="card"><div class="list">${D.schools.map((s) => `<div class="li person"><div style="min-width:0"><div class="name">${esc(s.code)} · ${esc(s.name)}</div><div class="small muted">${count(s.code)} facilitators · ${s.weeks || 10}-week programme</div>
         ${G.edit === "s:" + s.code ? weeksCard(s, "Programme length", "Facilitators' plans at this school adjust to it.") : ""}</div>
-        <div class="row pa">${G.edit === "s:" + s.code ? `<button class="btn ghost mat" data-g="editClose">Close</button>` : `<button class="btn mat" data-g="edit" data-id="s:${esc(s.code)}">Programme length</button>`}</div></div>`).join("") || `<p class="muted">No schools yet.</p>`}</div></div>`;
+        ${G.edit === "d:" + s.code ? deleteCard(s, D) : ""}</div>
+        <div class="row pa">${G.edit === "s:" + s.code || G.edit === "d:" + s.code ? `<button class="btn ghost mat" data-g="editClose">Close</button>` : `<button class="btn mat" data-g="edit" data-id="s:${esc(s.code)}">Programme length</button><button class="btn mat danger" data-g="edit" data-id="d:${esc(s.code)}">Delete school</button>`}</div></div>`).join("") || `<p class="muted">No schools yet.</p>`}</div></div>`;
   }
 
   // ---------------------------------------------------------------- actions
@@ -2076,10 +2092,19 @@ const Gate = (() => {
       const r = await Auth.fn({ action: "update", user_id: f.dataset.id, role, school_code: ["super_admin", "linchpin_admin"].includes(role) ? null : val("e_school"), linchpin_schools: role === "linchpin_admin" ? checked("e_lp") : [] });
       if (r.j && r.j.ok) { G.edit = null; say("", "Access updated."); await loadData(true); } else say((r.j && r.j.error) || "That didn't save. Try again.");
     }),
+    g_delschool: (f) => {
+      const code = f.dataset.code, typed = val("del_confirm").trim().toUpperCase();
+      if (typed !== code) { say(`Type ${code} exactly to confirm.`); draw(); return; }
+      return busy(async () => {
+        const r = await Auth.fn({ action: "delete_school", school_code: code, confirm: typed });
+        if (r.j && r.j.ok) { G.edit = null; G.filter = ""; say("", `${code} deleted: ${r.j.people} ${r.j.people === 1 ? "account" : "accounts"}, ${r.j.classes} ${r.j.classes === 1 ? "class" : "classes"} and ${r.j.children} children's results removed.`); await loadData(true); }
+        else say((r.j && r.j.error) || "The school couldn't be deleted. Check the internet and try again.");
+      });
+    },
     g_school: () => busy(async () => {
-      const r = await Auth.rpc("s2r_create_school", { p_code: val("s_code"), p_name: val("s_name") });
+      const r = await Auth.rpc("s2r_create_school", { p_code: null, p_name: val("s_name") });
       if (r.j && r.j.ok) { const wk = +val("s_weeks") || 10; if (wk !== 10) await Auth.rpc("s2r_set_school_weeks", { p_code: r.j.code, p_weeks: wk });
-        say("", `School ${r.j.code} added.`); await loadData(true); } else say((r.j && r.j.error) || "The school couldn't be added.");
+        say("", `${val("s_name").trim()} added with the code ${r.j.code}.`); await loadData(true); } else say((r.j && r.j.error) || "The school couldn't be added.");
     }),
   };
   document.addEventListener("click", (e) => { const el = e.target.closest("[data-g]"); if (!el || !clicks[el.dataset.g]) return; e.preventDefault(); e.stopPropagation(); clicks[el.dataset.g](el); }, true);
