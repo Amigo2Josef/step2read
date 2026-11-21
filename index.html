@@ -247,7 +247,8 @@ const DATA = {"say":{"a":"/a/ as in ant: mouth open, short sound","m":"lips toge
 "use strict";
 
 // ------------------------------------------------------------------ accounts (sign-in, invites, portals)
-// Everyone signs in. Joseph (super admin) and school admins invite people by email; the invite link
+// Everyone signs in. Joseph (super admin) and school admins invite people on WhatsApp: the server makes the
+// invite link (no email is sent) and the admin's own WhatsApp opens with it ready to send. The link
 // opens this app to set a password and phone number. After that, people sign in with phone + password.
 // Results stay on the phone and work offline; they are sent to the programme only from a signed-in account.
 const SB_URL = "https://yfinjbgozqmtmlensjxe.supabase.co";
@@ -321,6 +322,8 @@ const Auth = (() => {
   };
 })();
 const NOT_REAL = ["DEMO", "TEST"];   // school codes that are never programme data (see s2r_sync: super admin entries go to TEST)
+const isPhoneOnly = (e) => /@phone\.step2read\.invalid$/.test(String(e || ""));   // placeholder login address for people invited by WhatsApp (never emailed)
+const phoneLocal = (ph) => (ph ? "0" + String(ph).slice(3) : "");
 const isStaff = (p) => !!p && ["super_admin", "linchpin_admin", "school_admin"].includes(p.role);
 
 
@@ -375,7 +378,7 @@ S = load();
 const SYNC_URL = "https://yfinjbgozqmtmlensjxe.supabase.co/rest/v1/rpc/s2r_sync"; // Step2Read results database (Supabase)
 const SYNC_PUBLIC_KEY = SB_KEY; // results are accepted only from a signed-in, active account
 const SYNC_KEY = "s2r-pilot-2026";
-const APP_VERSION = "1.4";
+const APP_VERSION = "1.5";
 const Sync = (() => {
   const META = "step2read.sync." + (Auth.uid() || "none");
   let meta = {}; try { meta = JSON.parse(localStorage.getItem(META) || "{}"); } catch (e) {}
@@ -1458,7 +1461,7 @@ function vMore() {
     <div class="row"><a class="btn" href="https://wa.me/?text=${encodeURIComponent(shareText())}" target="_blank" rel="noopener">Share on WhatsApp</a><button class="btn" data-act="copySum">Copy summary</button></div></div>
   <div class="card stack-s"><h3>Settings</h3><p class="small">${isParent() ? "Home" : esc(S.setup.school || "Class")} · ${isParent() ? esc(GRADE_LABEL[lgrade(S.learners[0])] || "") : gradeMix()} · ${S.setup.minutes} minutes × ${S.setup.days} days</p>
     <div class="row"><button class="btn" data-act="editSetup">Change setup</button>${S.ui.confirmReset ? `<button class="btn danger" data-act="resetAll">Yes, erase everything</button><button class="btn ghost" data-act="cancelReset">Keep my data</button>` : `<button class="btn danger" data-act="askReset">Erase all data</button>`}</div></div>
-  <p class="small muted">Step2Read v1.4 · English · aligned to the KICD CBE designs (PP1–Grade 3) · printable packs come with the school web version.</p></div>`;
+  <p class="small muted">Step2Read v1.5 · English · aligned to the KICD CBE designs (PP1–Grade 3) · printable packs come with the school web version.</p></div>`;
 }
 
 // ------------------------------------------------------------------ school–home link (WhatsApp codes, no server)
@@ -1466,7 +1469,7 @@ function vMore() {
 // Parent → teacher: an "H" code with home sessions done, how they went, and any home checks.
 // School sets the pace: home practice always follows the child's school unit-week, and a home check changes the
 // child's level only when the teacher accepts it.
-const APP_URL = "";   // set to the public link once hosted; messages then carry it
+const APP_URL = "https://amigo2josef.github.io/step2read/";   // the public link; WhatsApp messages carry it
 const HOME_DAYS = { 3: [1, 3, 4], 4: [1, 2, 3, 4], 5: [1, 2, 3, 4, 5] };
 const RATE = { e: "Easy", o: "OK", h: "Hard" };
 const b64e = (o) => btoa(unescape(encodeURIComponent(JSON.stringify(o)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -1817,7 +1820,7 @@ const Gate = (() => {
   function vLoading() { return `<div class="card stack-s"><h2>Signing you in…</h2><p class="muted">One moment.</p></div>`; }
   function vSignin() {
     return `<form class="stack auth" id="g_signin" novalidate>
-      <div class="stack-s"><p class="label">Step2Read · Reading programme</p><h1>Sign in</h1><p class="muted">Use the phone number and password you set up from your invite email.</p></div>
+      <div class="stack-s"><p class="label">Step2Read · Reading programme</p><h1>Sign in</h1><p class="muted">Use the phone number and password you set up from your invite.</p></div>
       ${note()}
       <div class="card stack">
         <label class="f">Phone number<input id="g_phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="e.g. 0712 345 678" required data-autofocus></label>
@@ -1829,7 +1832,7 @@ const Gate = (() => {
   }
   function vForgot() {
     return `<form class="stack auth" id="g_forgot" novalidate>
-      <div class="stack-s"><p class="label">Step2Read</p><h1>Reset your password</h1><p class="muted">Enter your phone number. We'll email a reset link to the address on your account.</p></div>
+      <div class="stack-s"><p class="label">Step2Read</p><h1>Reset your password</h1><p class="muted">Enter your phone number. If your account has an email address, we'll send a reset link there. If not, ask your programme lead: they can send you a reset link on WhatsApp.</p></div>
       ${note()}
       <div class="card stack">
         <label class="f">Phone number<input id="g_phone" type="tel" inputmode="tel" autocomplete="tel" required data-autofocus></label>
@@ -1872,7 +1875,7 @@ const Gate = (() => {
       <div class="card stack-s">
         <p><span class="label">Access</span><br>${ROLE_LABEL[p.role] || ""}${p.school_code ? ` · ${esc(p.school_code)}` : ""}</p>
         <p><span class="label">Phone</span><br>${esc(p.phone ? "0" + String(p.phone).slice(3) : "")}</p>
-        <p><span class="label">Email</span><br>${esc(p.email || "")}</p>
+        ${p.email && !isPhoneOnly(p.email) ? `<p><span class="label">Email</span><br>${esc(p.email)}</p>` : ""}
       </div>
       <div class="card stack-s"><h3>Sign out</h3>
         ${unsent ? `<p class="banner small">Some results on this phone have not been sent yet. Connect to the internet and wait for <b>Synced</b> before signing out, or they will wait until you sign in again on this phone.</p>` : `<p class="small muted">Your results stay on this phone and come back when you sign in again here.</p>`}
@@ -1965,10 +1968,32 @@ const Gate = (() => {
       ${L.map((l) => `<tr><td><b>${esc(l.child_name)}</b></td><td>${esc(l.school_code)}</td><td>${esc(l.facilitator || "")}</td><td>${l.checks}</td><td>${l.first_level ? `${l.first_level} <small class="muted">${fmtD(l.first_check)}</small>` : "–"}</td><td>${l.latest_level ? `${l.latest_level} <small class="muted">${fmtD(l.latest_check)}</small>` : "–"}</td><td>${l.levels_gained != null && l.checks > 1 ? (l.levels_gained > 0 ? "+" : "") + l.levels_gained : "–"}</td><td>${l.latest_wpm ?? ""}</td></tr>`).join("")}</tbody></table></div>`
         : `<p class="muted small">No children have synced yet.</p>`}</div>`;
   }
+  // The message an admin sends from their own WhatsApp, carrying the one-time link.
+  function waMessage(x) {
+    const p = me() || {}; const first = String(x.full_name || "").split(" ")[0] || "there";
+    const from = `${p.full_name || "Your programme lead"}${p.phone ? ` (${phoneLocal(p.phone)})` : ""}`;
+    const lead = x.kind === "reset"
+      ? `Hello ${first}, this is ${from}. Here is your link to choose a new Step2Read password:`
+      : `Hello ${first}, this is ${from}. I've added you to Step2Read, our reading programme app. Tap this link to set your password:`;
+    return `${lead}\n\n${x.link}\n\nThe link works once and expires after a while, so please open it soon. After that, open ${APP_URL || "Step2Read"} and sign in with your phone number${x.phone ? ` ${phoneLocal(x.phone)}` : ""} and your password.`;
+  }
+  function shareCard() {
+    const x = G.share; if (!x) return "";
+    const msg = waMessage(x);
+    return `<div class="card stack-s" style="border-color:var(--maize)"><h3>${x.kind === "reset" ? "Reset link ready" : "Invite ready"} for ${esc(x.full_name)}</h3>
+      <p class="small">WhatsApp should have opened with the message. If it didn't, tap <b>Open WhatsApp</b>. It goes from the WhatsApp on this device, so use the phone with your own number.</p>
+      <div class="row"><a class="btn primary" href="${waHref(x.phone, msg)}" target="_blank" rel="noopener">Open WhatsApp</a><button class="btn" data-g="copyShare">Copy message</button><button class="btn ghost" data-g="closeShare">Done</button></div>
+      <textarea id="shareBox" readonly style="min-height:90px;font-size:.75rem">${esc(msg)}</textarea>
+      <p class="small muted">The link signs them straight in, so send it only to ${esc(x.full_name)}${x.phone ? ` on ${esc(phoneLocal(x.phone))}` : ""}.</p></div>`;
+  }
+  function openShare(j) {   // remember the link, then open WhatsApp with the message ready
+    G.share = { full_name: j.full_name, phone: j.phone, link: j.link, kind: j.kind || "invite" };
+    try { window.open(waHref(j.phone, waMessage(G.share)), "_blank", "noopener"); } catch (e) {}
+  }
   function pPeople(D, p) {
     const canAdd = p.role === "super_admin" || p.role === "school_admin";
     const list = D.people.slice().sort((a, b) => (a.status === "disabled") - (b.status === "disabled"));
-    return `${canAdd ? inviteCard(D, p) : ""}
+    return `${shareCard()}${canAdd ? inviteCard(D, p) : ""}
       <div class="card"><div class="list">${list.map((x) => personRow(x, p, D)).join("") || `<p class="muted">No one yet.</p>`}</div></div>`;
   }
   function roleOpts(p, sel) {
@@ -1982,13 +2007,14 @@ const Gate = (() => {
     if (!G.inviteOpen) return `<button class="btn primary" data-g="inviteOpen">+ Add a person</button>`;
     if (sup && !D.schools.length) return `<div class="banner info">Add a school first (Schools tab), then invite its people.</div>`;
     return `<form class="card stack" id="g_invite" novalidate><h3>Add a person</h3>
-      <p class="small muted">They'll get an email from Step2Read with a link to set their password and phone number.</p>
-      <div class="grid2"><label class="f">Full name<input id="i_name" required autocomplete="off"></label><label class="f">Email<input id="i_email" type="email" required autocomplete="off"></label></div>
+      <p class="small muted">Step2Read makes their invite link, then opens WhatsApp on this device with the message ready, so it goes from your own WhatsApp number. You just tap Send.</p>
+      <div class="grid2"><label class="f">Full name<input id="i_name" required autocomplete="off"></label><label class="f">WhatsApp number<input id="i_phone" type="tel" inputmode="tel" required autocomplete="off" placeholder="e.g. 0712 345 678"></label></div>
+      <label class="f">Email (optional)<input id="i_email" type="email" autocomplete="off" placeholder="Only if they use email"></label>
       <div class="grid2"><label class="f">Access level<select id="i_role">${roleOpts(p, "facilitator")}</select></label>
         ${sup ? `<label class="f" id="i_schoolbox">School<select id="i_school">${schoolOpts(D, "")}</select></label>` : `<p class="small muted" style="align-self:end">School: <b>${esc(p.school_code)}</b></p>`}</div>
       <p class="small muted" id="i_help">${ROLE_HELP.facilitator}</p>
       ${sup ? `<div class="stack-s" id="i_lpbox" hidden><span class="small">Schools this Linchpin admin can see</span><div class="row">${lpBoxes(D, "i_lp", [])}</div></div>` : ""}
-      <div class="row"><button class="btn primary" ${G.busy ? "disabled" : ""}>${G.busy ? "Sending invite…" : "Send invite"}</button><button type="button" class="btn ghost" data-g="inviteClose">Cancel</button></div></form>`;
+      <div class="row"><button class="btn primary" ${G.busy ? "disabled" : ""}>${G.busy ? "Making the invite…" : "Make invite and open WhatsApp"}</button><button type="button" class="btn ghost" data-g="inviteClose">Cancel</button></div></form>`;
   }
   function personRow(x, p, D) {
     const sup = p.role === "super_admin";
@@ -2004,8 +2030,9 @@ const Gate = (() => {
       <div class="row"><button class="btn primary mat" ${G.busy ? "disabled" : ""}>Save</button><button type="button" class="btn ghost mat" data-g="editClose">Cancel</button></div></form>`;
     return `<div class="li person"><div style="min-width:0"><div class="name">${esc(x.full_name)} ${st}${mine ? ` <span class="hb">You</span>` : ""}</div>
       <div class="small muted">${ROLE_LABEL[x.role]} · ${esc(where)}${x.phone ? ` · 0${esc(String(x.phone).slice(3))}` : ""}</div>
-      <div class="small muted">${esc(x.email)}${act ? ` · ${act}` : ""}</div>${edit}</div>
-      <div class="row pa">${canManage ? `${x.status === "invited" ? `<button class="btn mat" data-g="resend" data-id="${x.user_id}">Resend invite</button>` : ""}
+      <div class="small muted">${isPhoneOnly(x.email) ? "WhatsApp invite · no email" : esc(x.email)}${act ? ` · ${act}` : ""}</div>${edit}</div>
+      <div class="row pa">${canManage ? `${x.status === "invited" ? `<button class="btn mat" data-g="resend" data-id="${x.user_id}">Send invite on WhatsApp</button>` : ""}
+        ${x.status === "active" ? `<button class="btn mat" data-g="resetLink" data-id="${x.user_id}">Send reset link</button>` : ""}
         ${sup && G.edit !== x.user_id ? `<button class="btn mat" data-g="edit" data-id="${x.user_id}">Change access</button>` : ""}
         ${x.status === "disabled" ? `<button class="btn mat" data-g="status" data-v="active" data-id="${x.user_id}">Switch on</button>` : `<button class="btn mat danger" data-g="status" data-v="disabled" data-id="${x.user_id}">Switch off</button>`}` : ""}</div></div>`;
   }
@@ -2078,7 +2105,10 @@ const Gate = (() => {
     inviteClose: () => { G.inviteOpen = false; say(); draw(); },
     edit: (el) => { G.edit = el.dataset.id; say(); draw(); },
     editClose: () => { G.edit = null; draw(); },
-    resend: (el) => busy(async () => { const r = await Auth.fn({ action: "resend", user_id: el.dataset.id }); r.j && r.j.ok ? say("", "Invite sent again.") : say((r.j && r.j.error) || "The invite couldn't be re-sent."); }),
+    resend: (el) => busy(async () => { const r = await Auth.fn({ action: "resend", user_id: el.dataset.id }); if (r.j && r.j.ok && r.j.link) { openShare(r.j); say(); window.scrollTo(0, 0); } else say((r.j && r.j.error) || "The invite link couldn't be made. Try again."); }),
+    resetLink: (el) => busy(async () => { const r = await Auth.fn({ action: "reset_link", user_id: el.dataset.id }); if (r.j && r.j.ok && r.j.link) { openShare(r.j); say(); window.scrollTo(0, 0); } else say((r.j && r.j.error) || "The reset link couldn't be made. Try again."); }),
+    copyShare: async () => { const t = $("#shareBox"); try { await navigator.clipboard.writeText(t.value); say("", "Message copied. Paste it into WhatsApp."); } catch (e) { t.select(); say("", "Message selected: copy it with your phone's menu."); } },
+    closeShare: () => { G.share = null; say(); draw(); },
     status: (el) => busy(async () => { const r = await Auth.fn({ action: "set_status", user_id: el.dataset.id, status: el.dataset.v });
       if (r.j && r.j.ok) { say("", el.dataset.v === "disabled" ? "Account switched off. They can no longer sign in or send results." : "Account switched back on."); await loadData(true); } else say((r.j && r.j.error) || "That didn't work. Try again."); }),
     csv: async (el) => {
@@ -2121,10 +2151,10 @@ const Gate = (() => {
     }),
     g_invite: () => busy(async () => {
       const p = me(); const role = val("i_role") || "facilitator";
-      const body = { action: "invite", full_name: val("i_name").trim(), email: val("i_email").trim(), role,
+      const body = { action: "invite", full_name: val("i_name").trim(), phone: val("i_phone").trim(), email: val("i_email").trim(), role,
         school_code: p.role === "school_admin" ? p.school_code : val("i_school"), linchpin_schools: role === "linchpin_admin" ? checked("i_lp") : [] };
       const r = await Auth.fn(body);
-      if (r.j && r.j.ok) { G.inviteOpen = false; say("", `Invite sent to ${body.email}. They'll show as Invited until they set up their account.`); await loadData(true); }
+      if (r.j && r.j.ok && r.j.link) { G.inviteOpen = false; openShare(r.j); say("", `${body.full_name} is added. Send the invite on WhatsApp; they'll show as Invited until they set up their account.`); await loadData(true); window.scrollTo(0, 0); }
       else say((r.j && r.j.error) || "The invite couldn't be sent. Check the internet and try again.");
     }),
     g_edit: (f) => busy(async () => {
