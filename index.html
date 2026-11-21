@@ -1975,7 +1975,7 @@ const Gate = (() => {
     const lead = x.kind === "reset"
       ? `Hello ${first}, this is ${from}. Here is your link to choose a new Step2Read password:`
       : `Hello ${first}, this is ${from}. I've added you to Step2Read, our reading programme app. Tap this link to set your password:`;
-    return `${lead}\n\n${x.link}\n\nThe link works once and expires after a while, so please open it soon. After that, open ${APP_URL || "Step2Read"} and sign in with your phone number${x.phone ? ` ${phoneLocal(x.phone)}` : ""} and your password.`;
+    return `${lead}\n\n${x.link}\n\nThe link works once and is valid for 24 hours. After that, open ${APP_URL || "Step2Read"} and sign in with your phone number${x.phone ? ` ${phoneLocal(x.phone)}` : ""} and your password.`;
   }
   function shareCard() {
     const x = G.share; if (!x) return "";
