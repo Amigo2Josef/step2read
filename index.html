@@ -320,6 +320,7 @@ const Auth = (() => {
     setSession, keep, token, api, rpc, get, fn, refreshProfile, signOut,
   };
 })();
+const NOT_REAL = ["DEMO", "TEST"];   // school codes that are never programme data (see s2r_sync: super admin entries go to TEST)
 const isStaff = (p) => !!p && ["super_admin", "linchpin_admin", "school_admin"].includes(p.role);
 
 
@@ -361,7 +362,7 @@ let WS = { cur: "main", admin: false };
 try { const w = JSON.parse(localStorage.getItem(WS_KEY) || "null"); if (w && w.cur) WS = { ...WS, ...w }; } catch (e) {}
 const dataKey = (id) => (id === "main" ? KEY : KEY + ":" + id);
 function wsSave() { try { localStorage.setItem(WS_KEY, JSON.stringify(WS)); } catch (e) {} }
-function wsRead(id) { try { const r = localStorage.getItem(dataKey(id)); return r ? JSON.parse(r) : null; } catch (e) { return null; } }
+function wsRead(id) { try { const r = localStorage.getItem(dataKey(id)); return r ? migrateGrades(JSON.parse(r)) : null; } catch (e) { return null; } }
 function load() { const s = wsRead(WS.cur); if (s) { s.ui = { screen: s.mode ? "home" : "welcome" }; return s; } return blank(); }
 function save() { try { const c = { ...S, ui: undefined, run: undefined }; localStorage.setItem(dataKey(WS.cur), JSON.stringify(c)); } catch (e) {}  if (typeof Sync !== "undefined") Sync.soon(); }
 S = load();
@@ -374,7 +375,7 @@ S = load();
 const SYNC_URL = "https://yfinjbgozqmtmlensjxe.supabase.co/rest/v1/rpc/s2r_sync"; // Step2Read results database (Supabase)
 const SYNC_PUBLIC_KEY = SB_KEY; // results are accepted only from a signed-in, active account
 const SYNC_KEY = "s2r-pilot-2026";
-const APP_VERSION = "1.2";
+const APP_VERSION = "1.4";
 const Sync = (() => {
   const META = "step2read.sync." + (Auth.uid() || "none");
   let meta = {}; try { meta = JSON.parse(localStorage.getItem(META) || "{}"); } catch (e) {}
@@ -395,9 +396,10 @@ const Sync = (() => {
     if (!d || !d.mode || d.example || !Array.isArray(d.learners) || !d.learners.length) return null;
     const st = d.setup || {};
     return { app: APP_VERSION, key: SYNC_KEY, device: meta.device, store: id, mode: d.mode,
-      facilitator: (Auth.profile() || {}).full_name || st.name || "", school: st.school || "", schoolCode: (Auth.profile() || {}).school_code || "", grade: st.grade || "", minutes: st.minutes || "", days: st.days || "", phone: st.phone || "",
+      facilitator: (Auth.profile() || {}).full_name || st.name || "", school: st.school || "", schoolCode: (Auth.profile() || {}).school_code || "", grade: "", minutes: st.minutes || "", days: st.days || "", phone: st.phone || "",
       planStart: d.plan ? d.plan.start || "" : "",
-      learners: d.learners.map((l) => ({ id: l.id, name: l.name || "", assessments: (l.assessments || []).map((a) => ({
+      test: (Auth.profile() || {}).role === "super_admin",
+      learners: d.learners.map((l) => ({ id: l.id, name: l.name || "", grade: l.grade || "", assessments: (l.assessments || []).map((a) => ({
         id: a.id, date: a.date, form: a.form, grade: a.grade, level: a.level, startUnit: a.startUnit, wcpm: a.wcpm || 0,
         acc: a.acc ?? "", comp: a.comp ?? "", gaps: a.gaps || [], diagnosed: !!a.diagnosed, source: a.source || "school" })) })),
       weeks: CYCLE, homeLog: d.homeLog || [] };
@@ -455,6 +457,22 @@ const wordsOf = (t) => t.match(/[A-Za-z][A-Za-z'\-]*/g) || [];
 function gradeNum(g) { return g.startsWith("G") ? +g.slice(1) : 0; }
 function fluencyKey(g) { const n = gradeNum(g); return n <= 1 ? "G1" : n === 2 ? "G2" : "G3"; }
 function targetWcpm(g) { const n = gradeNum(g); return n <= 1 ? 30 : n === 2 ? 65 : 90; }
+// Plans follow reading level, not grade. A learner's own grade is used only to tailor their reading check
+// (which passage they read and which benchmark marks "reading at grade level").
+const LADDER_END = 18;
+const lgrade = (ln) => (ln && ln.grade) || "";
+function bandFluencyKey(w) { return w < 30 ? "G1" : w < 65 ? "G2" : "G3"; }   // story set matched to the group's reading speed
+function bandTarget(w) { return w < 30 ? 30 : w < 65 ? 65 : 90; }             // next speed benchmark above the group
+function startLabel(a) { return a.level === "L5" || a.level === "L6" ? "Fluency and comprehension" : `Unit ${a.startUnit}: ${esc(DATA.unitNames[a.startUnit])}`; }
+// One-off upgrade for classes set up with a single class grade: each learner takes that grade until the facilitator checks it.
+function migrateGrades(s) {
+  if (!s || !s.setup || !s.setup.grade || !Array.isArray(s.learners)) return s;
+  const g = s.setup.grade;
+  for (const l of s.learners) if (!l.grade) l.grade = g;
+  if (s.mode === "teacher" && !s.example && s.learners.length) { s.setup.gradeCheck = true; s.setup.oldGrade = g; }
+  delete s.setup.grade;
+  return s;
+}
 function weekOfPlan() {
   if (!S.plan) return 1;
   const days = Math.floor((Date.now() - new Date(S.plan.start + "T00:00:00").getTime()) / 864e5);
@@ -488,18 +506,13 @@ function dose(unit, levels, gapUnits) {
 function unitWeeks(u) { return u === 0 ? 1 : DATA.days[u].length; }
 // Whole teaching weeks: each calendar week teaches one unit-week (5 days). Small review doses pair two units in one week;
 // a unit-week that needs more time than the week allows gets a "second time through" week.
-function pace(units, eff, days, levels, gapUnits, grade) {
+function pace(units, eff, days, levels, gapUnits) {
   const q = []; for (const u of units) { const n = unitWeeks(u); for (let k = 0; k < n; k++) q.push({ u, wk: k, of: n, left: dose(u, levels, gapUnits) / n, times: 0 }); }
-  const weeks = []; const done = []; const taught = []; let carry = 0; let rev = 0;
+  const weeks = []; const done = []; const taught = []; let carry = 0;
   const ref = (x) => ({ u: x.u, wk: x.wk, of: x.of });
   for (let w = 1; w <= CYCLE; w++) {
     const Bw = eff * (days - (CHECKS.includes(w) ? 1 : 0)) * CONSOLIDATION; const avail = Bw + carry;
-    if (!q.length) {   // grade target reached: fluency for Grade 1+, otherwise review the units taught
-      if (GRADE_END[grade].wcpm) weeks.push({ t: "f" });
-      else if (grade === "PP1" || !taught.length) weeks.push({ t: "u", items: [{ u: 0, wk: 0, of: 1 }], again: 0 });
-      else weeks.push({ t: "u", items: [taught[rev++ % taught.length]], again: 0, review: true });
-      carry = 0; continue;
-    }
+    if (!q.length) { weeks.push({ t: "f" }); carry = 0; continue; }   // top of the ladder reached: fluency and comprehension
     const a = q[0];
     if (a.left > avail + 0.25 * Bw) { a.left -= avail; weeks.push({ t: "u", items: [ref(a)], again: a.times }); a.times++; carry = 0; continue; }
     q.shift(); let used = a.left; const items = [ref(a)]; const b = q[0];
@@ -513,24 +526,19 @@ function pace(units, eff, days, levels, gapUnits, grade) {
   return { weeks, done };
 }
 function gainPerWeek(eff, days) { return Math.min(GAIN_CAP, GAIN_BASE * eff * days / 100); }
-function horizon(start, grade, wcpm, eff, days, levels, gapUnits) {
-  const t = GRADE_END[grade]; const weekly = eff * days * CONSOLIDATION * (CYCLE - 0.4) / CYCLE;
-  let remaining = 0; for (let u = start; u <= t.unit; u++) remaining += dose(u, levels, gapUnits);
-  let weeks = weekly ? remaining / weekly : Infinity;
-  if (t.wcpm) { const g = gainPerWeek(eff, days); const s = wcpm + 0.5 * g * weeks; if (s < t.wcpm) weeks += g ? (t.wcpm - s) / g : Infinity; }
-  return weeks / TERM_WEEKS;
-}
 function fluencyOnly(levels) { return [...levels].length > 0 && [...levels].every((l) => l === "L5" || l === "L7"); }
 function median(a) { const b = [...a].sort((x, y) => x - y); const m = Math.floor(b.length / 2); return b.length % 2 ? b[m] : (b[m - 1] + b[m]) / 2; }
-function planGroup(title, learners, grade, mode, minutes, days, bands, band) {
+function planGroup(title, learners, mode, minutes, days, bands, band) {
   const eff = effMinutes(mode, minutes, bands, band);
   const levels = new Set(learners.map((l) => l.level));
   const starts = learners.map((l) => l.startUnit).sort((a, b) => a - b);
   const start = starts.length > 1 ? starts[Math.max(0, Math.ceil(starts.length * 0.25) - 1)] : starts[0];
   const flagged = learners.filter((l) => l.startUnit < start).map((l) => l.id);
   const gapUnits = new Set(learners.flatMap((l) => l.gaps || []));
-  const units = []; for (let u = start; u <= GRADE_END[grade].unit; u++) units.push(u);
-  const { weeks, done } = pace(units, eff, days, levels, gapUnits, grade);
+  const units = []; for (let u = start; u <= LADDER_END; u++) units.push(u);
+  const { weeks, done } = pace(units, eff, days, levels, gapUnits);
+  const l0 = learners.filter((l) => l.level === "L0");
+  const u0 = l0.length && l0.every((l) => l.grade === "PP2") ? "PP2" : "PP1";   // Unit 0 route: syllables only if every L0 child is in PP2
   const securedBy = (wk) => { const us = done.filter(([, w]) => w <= wk).map(([u]) => u); return us.length ? Math.max(...us) : null; };
   const gain = gainPerWeek(eff, days); const w0 = median(learners.map((l) => l.wcpm || 0));
   const fluency = fluencyOnly(levels) || !units.length;
@@ -539,21 +547,21 @@ function planGroup(title, learners, grade, mode, minutes, days, bands, band) {
     weeks: fluencyOnly(levels) ? weeks.map(() => ({ t: "f" })) : weeks, sec5: securedBy(CHECKS[0]), sec10: securedBy(CYCLE), wcpmNow: w0,
     wcpm5: Math.round(w0 + gain * (fluency ? CHECKS[0] : CHECKS[0] / 2)), wcpm10: Math.round(w0 + gain * (fluency ? CYCLE : CYCLE / 2)), fluency,
     compFocus: learners.filter((l) => (l.level === "L5" || l.level === "L7") && l.comp <= 3).length >= Math.max(1, Math.floor(learners.length / 2)),
-    terms: Math.round(horizon(start, grade, w0, eff, days, levels, gapUnits) * 10) / 10,
+    u0,
   };
 }
 function makePlan() {
   if (S.link && S.mode === "parent") return;   // a linked child's plan comes from the school
-  const { grade, minutes, days } = S.setup; const mode = S.mode;
+  const { minutes, days } = S.setup; const mode = S.mode;
   const rows = S.learners.map((ln) => ({ ln, a: latest(ln) })).filter((x) => x.a);
-  const learners = rows.map(({ ln, a }) => ({ id: ln.id, level: a.level, startUnit: a.startUnit, wcpm: a.wcpm || 0, comp: a.comp ?? 5, gaps: a.gaps || [] }));
+  const learners = rows.map(({ ln, a }) => ({ id: ln.id, grade: lgrade(ln) || a.grade, level: a.level, startUnit: a.startUnit, wcpm: a.wcpm || 0, comp: a.comp ?? 5, gaps: a.gaps || [] }));
   const warnings = [];
   if (minutes * days < 60) warnings.push(`Only ${minutes * days} minutes a week: progress will be slow. At least 30 minutes, 5 days a week is recommended.`);
   let groups = [], atLevel = [];
   if (mode === "parent") {
     const l = learners[0];
     if (l && l.level === "L6") atLevel = [l.id];
-    else if (l) groups = [{ band: bandOf(l.level), ...planGroup("Home plan", [l], grade, mode, minutes, days, [bandOf(l.level)], bandOf(l.level)) }];
+    else if (l) groups = [{ band: bandOf(l.level), ...planGroup("Home plan", [l], mode, minutes, days, [bandOf(l.level)], bandOf(l.level)) }];
   } else {
     const banded = {};
     for (const l of learners) { const b = bandOf(l.level); if (b) (banded[b] = banded[b] || []).push(l); else atLevel.push(l.id); }
@@ -564,11 +572,11 @@ function makePlan() {
       }
     }
     const bl = Object.keys(banded).map(Number).sort();
-    groups = bl.map((b) => ({ band: b, ...planGroup(`Band ${b}: ${BANDS[b][0]}`, banded[b], grade, mode, minutes, days, bl, b) }));
+    groups = bl.map((b) => ({ band: b, ...planGroup(`Band ${b}: ${BANDS[b][0]}`, banded[b], mode, minutes, days, bl, b) }));
     for (const g of groups) if (g.learnerIds.length > 15) warnings.push(`${g.title} has ${g.learnerIds.length} learners. Split it if a second adult can help.`);
   }
   const keep = S.plan && S.plan.start && (Date.now() - new Date(S.plan.start + "T00:00:00").getTime()) < CYCLE * 7 * 864e5;
-  S.plan = { v: 2, weeks: CYCLE, start: keep ? S.plan.start : today(), made: today(), grade, minutes, days, groups, atLevel, warnings };
+  S.plan = { v: 3, weeks: CYCLE, start: keep ? S.plan.start : today(), made: today(), minutes, days, groups, atLevel, warnings };
   save();
 }
 
@@ -661,10 +669,10 @@ const EXAMPLES = {
 function loadExample(key = "g2") {
   const X = EXAMPLES[key];
   S = blank(); S.mode = "teacher"; S.example = key;
-  S.setup = { ...X.setup, grade: X.grade, minutes: X.minutes, days: X.days };
+  S.setup = { ...X.setup, minutes: X.minutes, days: X.days };
   const d = new Date(Date.now() - X.ago * 864e5).toISOString().slice(0, 10);
   S.learners = X.names.map((n, i) => { const [level, su, w] = X.mix[i];
-    return { id: uid(), name: n, assessments: [{ id: uid(), date: d, form: "A", grade: X.grade, level, startUnit: su, gaps: level === "L1" ? [su, su + 2] : [],
+    return { id: uid(), name: n, grade: X.grade, assessments: [{ id: uid(), date: d, form: "A", grade: X.grade, level, startUnit: su, gaps: level === "L1" ? [su, su + 2] : [],
       missedTricky: [], wcpm: w, acc: w ? 92 : null, comp: level >= "L5" ? 3 + (i % 3) : null, focus: [], diagnosed: true }] }; });
   makePlan(); S.plan.start = d; seedExampleLinks(); save(); S.ui = { screen: "home" };
 }
@@ -730,7 +738,7 @@ function vWelcome() {
 // -- setup
 function vSetup() {
   const p = S.ui.mode === "parent"; const s = S.setup || {};
-  const gradeOpts = GRADES.map((g) => `<option value="${g}" ${s.grade === g ? "selected" : ""}>${GRADE_LABEL[g]}</option>`).join("");
+  const gradeOpts = gradeOptions(p ? lgrade(S.learners[0]) : "");
   const mins = p ? [10, 15, 20, 30] : [10, 15, 20, 30, 40, 45, 60]; const dm = s.minutes || (p ? 15 : 30);
   return `<form class="stack" id="setupForm">
   <div class="stack-s"><p class="label">${p ? "Parent setup" : "Teacher setup"}</p><h1>${p ? "Tell us about your child" : "Set up your class"}</h1></div>
@@ -738,7 +746,7 @@ function vSetup() {
     <label class="f">Your name<input id="f_name" required value="${esc(s.name || (Auth.profile() || {}).full_name || "")}" placeholder="${p ? "e.g. Mama Akinyi" : "e.g. Teacher Wanjiku"}" data-autofocus></label>
     ${p ? `<label class="f">Child's name<input id="f_child" required value="${esc((S.learners[0] || {}).name || "")}" placeholder="e.g. Amani"></label>`
         : `<label class="f">School<input id="f_school" value="${esc(s.school || "")}" placeholder="e.g. Upendo Academy"></label>${(Auth.profile() || {}).school_code ? `<p class="small muted">Results from this class are reported under <b>${esc(Auth.profile().school_code)}</b>.</p>` : ""}`}
-    <label class="f">${p ? "Child's grade" : "Class grade"}<select id="f_grade">${gradeOpts}</select></label>
+    ${p ? `<label class="f">Child's grade<select id="f_grade" required>${gradeOpts}</select></label><p class="small muted">Used to choose the right reading check. Home practice follows the reading level your child is at.</p>` : ""}
     ${Gate.weeks() ? `<p class="small muted">Programme length: <b>${Gate.weeks()} weeks</b>, set by your school. Progress checks fall in week ${CHECKS[0]} and week ${CYCLE}.</p>`
       : `<label class="f">Programme length (weeks)<input id="f_weeks" type="number" min="2" max="30" inputmode="numeric" value="${s.weeks || CYCLE}"></label>`}
     <div class="grid2">
@@ -752,10 +760,31 @@ function vSetup() {
       <label class="f">Home days a week<select id="f_hd">${[3, 4, 5].map((m) => `<option ${m === (s.homeDays || 5) ? "selected" : ""}>${m}</option>`).join("")}</select></label></div>
     <label class="f">Your WhatsApp number (optional)<input id="f_phone" inputmode="tel" value="${esc(s.phone || "")}" placeholder="So parents' reports come straight to you"></label>
     <p class="small muted">You can change these for any child later.</p></div>`}
-  ${p ? "" : `<div class="card stack-s"><label class="f">Learners (one name per line)<textarea id="f_names" placeholder="Amani Otieno&#10;Baraka Kiprop&#10;Chebet Wanjiru">${esc(S.learners.map((l) => l.name).join("\n"))}</textarea></label>
+  ${p ? "" : `<div class="card stack-s"><h3>Learners</h3>
+    <p class="small muted">Mixed grades are fine. Choose a grade, then type the names of learners in that grade, one per line. Add another grade for the next group. A learner's grade only decides which reading check they get; groups and lessons follow each child's reading level.</p>
+    <div id="gglist" class="stack-s">${gradeGroups().map(ggHTML).join("")}</div>
+    <div><button class="btn" type="button" data-act="ggAdd">+ Add another grade</button></div>
+    <p id="ggMsg" class="small banner" hidden></p>
     <p class="small muted">You can add more learners later.</p></div>`}
   <div class="row"><button class="btn primary" type="submit">Save and continue</button><button class="btn ghost" type="button" data-act="cancelSetup">Back</button></div>
 </form>`;
+}
+
+function alertBox(t) { const f = $("#setupForm"); if (!f) return; let b = $("#setupMsg"); if (!b) { f.insertAdjacentHTML("afterbegin", `<p id="setupMsg" class="small banner"></p>`); b = $("#setupMsg"); } b.textContent = t; b.scrollIntoView({ block: "center" }); }
+function gradeOptions(sel) { return `<option value="" ${sel ? "" : "selected"} disabled>Choose a grade</option>` + GRADES.map((g) => `<option value="${g}" ${sel === g ? "selected" : ""}>${GRADE_LABEL[g]}</option>`).join(""); }
+function gradeGroups() {   // existing learners grouped by grade, in the order they appear
+  const by = {}, order = [];
+  for (const l of S.learners) { const g = l.grade || ""; if (!(g in by)) { by[g] = []; order.push(g); } by[g].push(l.name); }
+  return order.length ? order.map((g) => ({ grade: g, names: by[g].join("\n") })) : [{ grade: "", names: "" }];
+}
+function ggHTML(g) {
+  return `<div class="gg card flat stack-s"><div class="row between" style="align-items:flex-end"><label class="f" style="flex:1">Grade<select class="gg-grade">${gradeOptions(g.grade)}</select></label>
+    <button class="btn ghost" type="button" data-act="ggRemove">Remove</button></div>
+    <label class="f">Names (one per line)<textarea class="gg-names" placeholder="Amani Otieno&#10;Baraka Kiprop&#10;Chebet Wanjiru">${esc(g.names)}</textarea></label></div>`;
+}
+function readGradeGroups() {
+  return [...document.querySelectorAll("#gglist .gg")].map((el) => ({ grade: el.querySelector(".gg-grade").value,
+    names: el.querySelector(".gg-names").value.split("\n").map((x) => x.trim()).filter(Boolean) }));
 }
 
 // -- home
@@ -785,17 +814,24 @@ function vHome() {
   const child = isParent() ? S.learners[0] : null; const a = child && latest(child);
   return `<div class="stack">
   ${S.example ? `<div class="banner small"><b>Example class.</b> These children and results are made up so you can explore. <button class="btn ghost" data-act="example" data-v="${S.example === "g1" ? "g2" : "g1"}">See the ${S.example === "g1" ? "Grade 2" : "Grade 1"} example</button> <button class="btn ghost" data-act="example" data-v="p">See a linked parent</button> <button class="btn ghost" data-act="resetAll">Start my own</button></div>` : ""}
-  <div class="stack-s"><p class="label">${isParent() ? "Home plan" : esc(s.school || "My class")} · ${GRADE_LABEL[s.grade]} · ${s.minutes} min × ${s.days} days</p>
+  ${!isParent() && s.gradeCheck ? `<div class="banner stack-s"><b>Please check each learner's grade</b><span class="small">Step2Read now uses each learner's own grade to choose their reading check, so one class can hold several grades. Everyone has been set to ${esc(GRADE_LABEL[s.oldGrade] || "the old class grade")} for now. Lessons and groups still follow reading level, so nothing about today's plan changes.</span>
+    <div class="row"><button class="btn primary" data-act="editSetup">Check grades</button><button class="btn ghost" data-act="gradesOk">They're all correct</button></div></div>` : ""}
+  <div class="stack-s"><p class="label">${isParent() ? `Home plan · ${esc(GRADE_LABEL[lgrade(child)] || "")}` : `${esc(s.school || "My class")} · ${gradeMix()}`} · ${s.minutes} min × ${s.days} days</p>
     <h1>${isParent() ? `${esc(child ? child.name : "Your child")}'s reading` : `Hello, ${esc(s.name || "teacher")}`}</h1></div>
   <div class="card stack-s" style="border-color:var(--maize)"><p class="label">Next step</p><h2>${na.t}</h2><p class="muted">${na.b}</p>
     <div><button class="btn primary" data-act="${na.a}">${na.l}</button></div></div>
   ${isParent() ? (a ? `<div class="card stack-s"><div class="row between"><h3>Latest check · ${fmtDate(a.date)}</h3>${lv(a.level)}</div>
-      ${a.wcpm ? `<p>Reads <b>${a.wcpm}</b> words a minute (${GRADE_LABEL[s.grade]} target: ${targetWcpm(s.grade)}).</p>` : ""}
+      ${a.wcpm ? `<p>Reads <b>${a.wcpm}</b> words a minute (${GRADE_LABEL[lgrade(child) || a.grade] || ""} benchmark: ${targetWcpm(lgrade(child) || a.grade || "")}).</p>` : ""}
       ${a.focus.length ? `<ul class="small" style="margin:0;padding-left:1.2em">${a.focus.map((f) => `<li>${esc(f)}</li>`).join("")}</ul>` : ""}</div>` : "")
     : `<div class="card stack"><div class="row between"><h3>Where the class is</h3><span class="small muted">${assessed} of ${S.learners.length} checked</span></div>${ladderHTML()}</div>`}
   ${S.plan && !isParent() ? linkSummaryCard() : ""}
-  ${S.plan ? `<div class="card stack-s"><div class="row between"><h3>Plan · week ${weekOfPlan()} of 10</h3><button class="btn ghost" data-go="plan">View</button></div>${weeksStrip()}</div>` : ""}
+  ${S.plan ? `<div class="card stack-s"><div class="row between"><h3>Plan · week ${weekOfPlan()} of ${CYCLE}</h3><button class="btn ghost" data-go="plan">View</button></div>${weeksStrip()}</div>` : ""}
 </div>`;
+}
+function gradeMix() {   // e.g. "Grade 2" or "PP2–Grade 4 (mixed)"
+  const gs = GRADES.filter((g) => S.learners.some((l) => l.grade === g));
+  if (!gs.length) return `${S.learners.length} learner${S.learners.length === 1 ? "" : "s"}`;
+  return gs.length === 1 ? GRADE_LABEL[gs[0]] : `${GRADE_LABEL[gs[0]]}–${GRADE_LABEL[gs[gs.length - 1]]} (mixed)`;
 }
 function weeksStrip() { const w = weekOfPlan(); return `<div class="weeks">${Array.from({ length: CYCLE }, (_, i) => `<span class="${i + 1 === w ? "now" : ""} ${CHECKS.includes(i + 1) ? "chk" : ""}">W${i + 1}</span>`).join("")}</div>
   <p class="small muted">Boxed weeks are progress checks.</p>`; }
@@ -805,18 +841,20 @@ function vLearners() {
   if (isParent()) { const c = S.learners[0]; return c ? vLearner(c.id) : vHome(); }
   return `<div class="stack"><div class="row between"><h1>Learners</h1><div class="row" style="gap:6px"><button class="btn" data-go="links">Home links</button><button class="btn" data-act="goPaste">Paste a parent's code</button><button class="btn ghost" data-act="editSetup">Edit class</button></div></div>
   <div class="card"><div class="list">${S.learners.map((ln) => { const a = latest(ln);
-    return `<div class="li"><div style="min-width:0"><div class="name">${esc(ln.name)} ${homeBadge(ln)}</div><div class="small muted">${a ? `Checked ${fmtDate(a.date)}${a.wcpm ? ` · ${a.wcpm} words/min` : ""}` : "Not checked yet"}</div></div>
+    return `<div class="li"><div style="min-width:0"><div class="name">${esc(ln.name)} ${homeBadge(ln)}</div><div class="small muted">${esc(GRADE_LABEL[ln.grade] || "Grade not set")} · ${a ? `Checked ${fmtDate(a.date)}${a.wcpm ? ` · ${a.wcpm} words/min` : ""}` : "Not checked yet"}</div></div>
       <div class="row" style="gap:6px">${a ? `<button class="btn ghost" data-act="openLearner" data-id="${ln.id}">${lv(a.level)}</button>` : `<button class="btn" data-act="assess" data-id="${ln.id}">Check</button>`}</div></div>`; }).join("") || '<p class="muted">No learners yet.</p>'}</div></div></div>`;
 }
 function vLearner(id) {
-  id = id || S.ui.id; const ln = S.learners.find((x) => x.id === id); if (!ln) return vLearners(); const a = latest(ln); const g = S.setup.grade;
+  id = id || S.ui.id; const ln = S.learners.find((x) => x.id === id); if (!ln) return vLearners(); const a = latest(ln); const g = lgrade(ln);
   return `<div class="stack">
   ${S.ui.flash ? `<div class="banner small">${esc(S.ui.flash)}</div>` : ""}
   <div class="row between"><h1>${esc(ln.name)}</h1>${a ? lv(a.level) : ""}</div>
+  ${isParent() && S.link ? "" : `<div class="card flat row between" style="align-items:flex-end"><label class="f" style="flex:1">Grade<select data-lgrade="${ln.id}">${gradeOptions(g)}</select></label>
+    <p class="small muted" style="flex:2;margin:0">Chooses which reading check ${esc(ln.name)} gets. Lessons follow the reading level.</p></div>`}
   ${a ? `<div class="card stack-s"><p class="label">Latest check · Form ${a.form} · ${fmtDate(a.date)}</p>
-    <div class="grid2"><div><div class="small muted">Starting unit</div><b>${a.startUnit <= GRADE_END[g].unit ? `Unit ${a.startUnit}: ${esc(DATA.unitNames[a.startUnit])}` : "Fluency and comprehension"}</b></div>
+    <div class="grid2"><div><div class="small muted">Starting unit</div><b>${startLabel(a)}</b></div>
     <div><div class="small muted">Reading speed</div><b>${a.wcpm ? `${a.wcpm} words a minute` : "Not yet reading connected text"}</b>${a.acc ? ` <span class="small muted">· ${a.acc}% accurate</span>` : ""}</div></div>
-    ${a.wcpm ? `<p class="small muted">${GRADE_LABEL[g]} target: ${targetWcpm(g)} words a minute${FLUENT_MOE[g] ? ` (MoE "fluent": ${FLUENT_MOE[g]}+)` : ""}.</p>` : ""}
+    ${a.wcpm && (g || a.grade) ? `<p class="small muted">${GRADE_LABEL[g || a.grade]} benchmark: ${targetWcpm(g || a.grade)} words a minute${FLUENT_MOE[g || a.grade] ? ` (MoE "fluent": ${FLUENT_MOE[g || a.grade]}+)` : ""}.</p>` : ""}
     ${a.focus.length ? `<ul class="small" style="margin:0;padding-left:1.2em">${a.focus.map((f) => `<li>${esc(f)}</li>`).join("")}</ul>` : ""}
     ${a.diagnosed ? "" : `<p class="small banner">Screener only. Run the full check to find the exact gaps.</p>`}</div>` : `<div class="card"><p class="muted">Not checked yet.</p></div>`}
   <div class="row">${isParent() && S.link ? `<button class="btn primary" data-act="homeCheck">Home check</button>` : `<button class="btn primary" data-act="assess" data-id="${ln.id}">${a ? "Check again" : "Start the check"}</button>`}</div>
@@ -828,8 +866,9 @@ function vLearner(id) {
 // -- assessment runner
 function startRun(id) {
   const ln = S.learners.find((x) => x.id === id); const n = (ln.assessments || []).length;
+  if (!lgrade(ln)) { go("learner", { id, flash: `Choose ${ln.name}'s grade first. It decides which reading check ${ln.name} gets.` }); return; }
   const form = n === 0 ? "A" : n === 1 ? "B" : n % 2 === 0 ? "C" : "B";
-  S.run = { learnerId: id, form, grade: S.setup.grade, r: {}, d: {}, step: "A", phase: "screener", level: null, cur: null };
+  S.run = { learnerId: id, form, grade: lgrade(ln), r: {}, d: {}, step: "A", phase: "screener", level: null, cur: null };
   newStep(); go("assess");
 }
 function newStep() { const R = S.run; R.cur = { wrong: [], last: null, started: false, done: false, secs: 0, q: [] }; stopTimer(); }
@@ -966,7 +1005,7 @@ function vResult() {
   return `<div class="stack"><p class="label">${homeRec ? "Home check" : "Check"} complete · ${esc(ln.name)}</p>
     ${homeRec ? `<div class="banner small">This result goes to ${esc(S.link.tn || "the teacher")} with your next update. ${esc(ln.name)}'s level and plan change only if the teacher agrees, so home and school stay on the same step.</div>` : ""}<h1>${a.level}: ${LEVEL_NAMES[a.level]}</h1>
     <div class="card stack-s"><p>${esc(levelBlurb(a.level))}</p>
-      <p><b>Starts at:</b> ${a.startUnit <= GRADE_END[S.setup.grade].unit ? `Unit ${a.startUnit} (${esc(DATA.unitNames[a.startUnit])})` : "fluency and comprehension"}</p>
+      <p><b>Starts at:</b> ${startLabel(a)}</p>
       ${a.focus.length ? `<ul class="small" style="margin:0;padding-left:1.2em">${a.focus.map((f) => `<li>${esc(f)}</li>`).join("")}</ul>` : ""}</div>
     <div class="row"><button class="btn primary" data-act="afterResult">${isParent() ? "See the home plan" : S.learners.some((l) => !latest(l)) ? "Check the next learner" : "Make the plan"}</button>
     <button class="btn" data-go="home">Home</button></div></div>`;
@@ -985,7 +1024,6 @@ function vPlan() {
   if (!S.plan) return `<div class="stack"><h1>Plan</h1><div class="card stack-s"><p class="muted">${S.learners.filter(latest).length ? "Ready when you are." : "Check at least one learner first."}</p>
     <div><button class="btn primary" data-act="makePlan" ${S.learners.filter(latest).length ? "" : "disabled"}>Make the ${CYCLE}-week plan</button></div></div></div>`;
   const P = S.plan; const w = weekOfPlan(); const name = (id) => esc((S.learners.find((l) => l.id === id) || {}).name || "");
-  const gEnd = GRADE_END[P.grade];
   return `<div class="stack">
   <div class="row between"><div><p class="label">Started ${fmtDate(P.start)} · ${P.minutes} min × ${P.days} days</p><h1>${P.weeks || CYCLE}-week plan</h1></div>${P.linked ? "" : `<button class="btn" data-act="makePlan">Update plan</button>`}</div>
   ${P.linked ? `<p class="small banner info">This is ${esc(S.learners[0].name)}'s school plan, set by ${esc(S.link.tn || "the teacher")}. Home practice follows it week by week.</p>` : ""}
@@ -993,7 +1031,7 @@ function vPlan() {
   ${P.warnings.map((x) => `<div class="banner small">${esc(x)}</div>`).join("")}
   ${P.groups.map((g) => `<div class="card stack">
     <div class="row between"><h2>${esc(g.title)}</h2><span class="small muted">${g.learnerIds.length} learner${g.learnerIds.length > 1 ? "s" : ""} · ${g.eff} effective min/day</span></div>
-    ${isParent() ? "" : `<p class="small">${g.learnerIds.map(name).join(", ")}</p>`}
+    ${isParent() ? "" : `<p class="small">${g.learnerIds.map((id) => { const ln = S.learners.find((l) => l.id === id) || {}; return `${esc(ln.name || "")}${ln.grade ? ` <span class="muted">(${esc(ln.grade)})</span>` : ""}`; }).join(", ")}</p>`}
     ${g.flagged.length ? `<p class="small banner">Extra support (start below the group): ${g.flagged.map(name).join(", ")}. Give them the home plan or a few minutes one-to-one.</p>` : ""}
     <div class="grid2">
       <div class="card flat"><p class="label">Week ${CHECKS[0]} target</p><b>${g.fluency ? `${g.wcpm5} words a minute` : g.sec5 !== null ? `Secure to Unit ${g.sec5}` : `Working on Unit ${g.start}`}</b></div>
@@ -1003,10 +1041,10 @@ function vPlan() {
       ${g.weeks.map((e, i) => { const wp = weekPlan(g, i + 1); return `<tr style="border-bottom:1px solid var(--line);${i + 1 === w ? "background:var(--maize-soft)" : ""}"><td style="padding:6px 8px;white-space:nowrap;font-weight:600;vertical-align:top">Week ${i + 1}${CHECKS.includes(i + 1) ? " ✓" : ""}</td>
         <td style="padding:6px 8px">${esc(wp.label)}${wp.patterns.length && wp.t === "u" ? `<div class="small muted">${esc(listS(wp.patterns))}</div>` : ""}</td></tr>`; }).join("")}
     </tbody></table></div>
-    ${isParent() ? `<p class="small muted">Goal by the end of the programme: ${g.fluency ? `reach ${g.wcpm10} words a minute` : `secure Unit ${g.sec10 ?? g.start}`}. Every extra 5 minutes a day brings ${GRADE_LABEL[P.grade]} level closer.</p>`
-      : `<p class="small muted">At this pace, ${GRADE_LABEL[P.grade]} level (Unit ${gEnd.unit}${gEnd.wcpm ? `, ${gEnd.wcpm} words a minute` : ""}) is about <b>${isFinite(g.terms) ? g.terms : "many"} term${g.terms === 1 ? "" : "s"}</b> away.${g.compFocus ? " Comprehension is a focus for most of this group." : ""}</p>`}
+    ${isParent() ? `<p class="small muted">Goal by the end of the programme: ${g.fluency ? `reach ${g.wcpm10} words a minute` : `secure Unit ${g.sec10 ?? g.start}`}. Every extra 5 minutes a day helps your child move up the ladder faster.</p>`
+      : `<p class="small muted">Lessons follow this group's reading level, whatever grade each child is in.${g.fluency ? ` Group reading speed now: ${g.wcpmNow} words a minute; next benchmark: ${bandTarget(g.wcpmNow || 0)}.` : ""}${g.compFocus ? " Comprehension is a focus for most of this group." : ""}</p>`}
   </div>`).join("")}
-  ${P.atLevel.length ? `<div class="card"><h3>At grade level</h3><p class="small">${P.atLevel.map(name).join(", ")}: independent reading during the block.</p></div>` : ""}
+  ${P.atLevel.length ? `<div class="card"><h3>Reading at their grade's benchmark</h3><p class="small">${P.atLevel.map(name).join(", ")}: independent reading during the block.</p></div>` : ""}
 </div>`;
 }
 
@@ -1027,9 +1065,9 @@ function alloc(M, ws) {   // split M minutes by weights into whole minutes (at l
 }
 
 // ---- week content
-function unit0Week(n) {
+function unit0Week(n, g) {
   const U0 = DATA.unit0; const games = U0.oral_games;
-  if (S.plan.grade === "PP2") {
+  if ((g && g.u0 ? g.u0 : S.plan.grade) === "PP2") {
     const rows = U0.syllables_pp2; const r = [0, 1, 2].map((i) => rows[(n * 3 + i) % rows.length]);
     const pairs = U0.syllable_plus_sound_pp2.slice((n * 3) % 8, (n * 3) % 8 + 3);
     const days = r.map((row, i) => ({ kind: "u0syl", day: i + 1, unit: 0, letters: [row[0][0]], syl: row, game: games[i % games.length] }));
@@ -1047,12 +1085,13 @@ function unit0Week(n) {
 function weekPlan(g, week) {
   const e = g.weeks[week - 1];
   if (!e || e.t === "f") {
-    const key = fluencyKey(S.plan.grade); const L = DATA.fluency[key]; const i = (week - 1) % L.length; const T = L[i];
+    const w0 = g.wcpmNow || 0; const key = bandFluencyKey(w0); const tgt = bandTarget(w0);
+    const L = DATA.fluency[key]; const i = (week - 1) % L.length; const T = L[i];
     const pw = DATA.flWords[key][i];
-    return { t: "f", label: `Fluency story: ${T.title}`, patterns: [], days: [1, 2, 3, 4, 5].map((d) => ({ kind: "fl", day: d, T, pw, unit: "F" })) };
+    return { t: "f", label: `Fluency story: ${T.title}`, patterns: [], days: [1, 2, 3, 4, 5].map((d) => ({ kind: "fl", day: d, T, pw, tgt, unit: "F" })) };
   }
   const it = e.items;
-  if (it[0].u === 0) { let n = 0; for (let k = 0; k < week - 1; k++) if (g.weeks[k].t === "u" && g.weeks[k].items[0].u === 0) n++; return unit0Week(n); }
+  if (it[0].u === 0) { let n = 0; for (let k = 0; k < week - 1; k++) if (g.weeks[k].t === "u" && g.weeks[k].items[0].u === 0) n++; return unit0Week(n, g); }
   const W = (x) => DATA.days[x.u][x.wk];
   const norm = (x, d) => ({ new: [], review: [], words: [], sentences: [], tricky_new: [], tricky_review: [], dictation: [], blend: {}, ...d, unit: x.u, story: !!d.story, again: !!(e.again || e.review) });
   if (it.length === 1) {
@@ -1100,7 +1139,7 @@ function goalOf(d) {
     case "story": return `read the story ${qt(textOf(d).title)} and answer a question about it`;
     case "check": return `show what they know: the week's sounds, words${d.story ? " and the story" : " and sentences"}`;
     case "fl": return ["understand the story and its harder words, after hearing it read well", "read in phrases, pausing at commas and full stops",
-      "read every word correctly, fixing their own mistakes", "read with expression and retell the story in order", `read for one minute towards ${targetWcpm(S.plan.grade)} words a minute`][d.day - 1];
+      "read every word correctly, fixing their own mistakes", "read with expression and retell the story in order", `read for one minute towards ${d.tgt || 30} words a minute`][d.day - 1];
     case "u0new": return `hear and say ${plural(d.letters.length, "the sound")} ${d.letters.join(" ")} and match ${d.letters.length > 1 ? "each" : "it"} to a letter`;
     case "u0syl": return `blend a sound with a vowel: ${d.syl.join(" ")}`;
     case "u0sort": return `sort words by their first sound (${d.letters.join(" ")})`;
@@ -1187,7 +1226,7 @@ function teachSteps(d, opt) {
           "Read the story one sentence at a time; the group echoes with the same phrasing, pausing at commas and full stops. Then listen to two children read a paragraph each.",
           "Listen to three children read a paragraph each. When a child makes a mistake, point back to the word: \"Look at the sounds. Try again.\"",
           "Show how to read questions, exclamations and speech with feeling. The group reads it back with you. Then children retell the story: beginning, middle, end.",
-          `Time 3 or 4 children reading for one minute each and count the words read correctly (the others read next Day 5). Target: ${targetWcpm(S.plan.grade)} words a minute.`][d.day - 1], "story"],
+          `Time 3 or 4 children reading for one minute each and count the words read correctly (the others read next Day 5). Target: ${d.tgt || 30} words a minute.`][d.day - 1], "story"],
       [d.day < 4 ? `Question (${q[d.day - 1].skill})` : d.day === 4 ? "All three questions" : "Celebrate", 2,
         d.day < 4 ? q[d.day - 1].q : d.day === 4 ? q.map((x) => x.q).join(" ") : "Each child compares with last time. Write the numbers in your record.", "story"]]; break; }
     case "u0new": st = [
@@ -1259,7 +1298,7 @@ function parentSteps(d) {
           "Read the story together, sentence by sentence, pausing at full stops. Then your child reads it alone.",
           "Your child reads the story twice. When they make a mistake, point to the word: \"Look again.\"",
           "Your child reads the story with expression (a question sounds like a question). Then they tell you the story in their own words.",
-          `Time your child reading for one minute. Count the words read correctly and write the number down. The goal is ${targetWcpm(S.plan.grade)} words a minute.`][d.day - 1], "story"],
+          `Time your child reading for one minute. Count the words read correctly and write the number down. The goal is ${d.tgt || 30} words a minute.`][d.day - 1], "story"],
       [d.day < 4 ? "Question" : d.day === 4 ? "Questions" : "Read again", 6, d.day < 4 ? q[d.day - 1].q : d.day === 4 ? q.map((x) => x.q).join(" ") : "Your child reads the story once more, just for fun.", "story"],
       ["Finish", 3, "Talk about the story in any language you like, then praise one thing your child did well.", null]]; }
     default: return teachSteps(d, { single: true }).concat([["Finish", 1, "Praise one thing your child did well.", null]]);
@@ -1400,7 +1439,7 @@ function drawReader() {
 function shareText() {
   if (isParent()) { const c = S.learners[0]; const a = c && latest(c);
     return `Step2Read: ${c ? c.name : ""} is at ${a ? a.level + " (" + LEVEL_NAMES[a.level] + ")" : "not yet checked"}${a && a.wcpm ? `, reading ${a.wcpm} words a minute` : ""}.`; }
-  const c = levelCounts(); return `Step2Read · ${S.setup.school || "My class"} (${GRADE_LABEL[S.setup.grade]}): ` + LEVELS.filter((l) => c[l]).map((l) => `${l} ${c[l]}`).join(", ") +
+  const c = levelCounts(); return `Step2Read · ${S.setup.school || "My class"} (${gradeMix()}): ` + LEVELS.filter((l) => c[l]).map((l) => `${l} ${c[l]}`).join(", ") +
     `. ${S.plan ? `Plan week ${weekOfPlan()} of 10.` : ""}`;
 }
 function vMore() {
@@ -1417,9 +1456,9 @@ function vMore() {
   ${BUILD_MODE ? `<div class="card stack-s"><h3>Super admin</h3><p class="small muted">${WS.admin ? "You are in super admin mode. Switch portals from the console." : "Build mode: open the teacher and parent portals side by side on this phone."}</p><div class="row"><button class="btn" data-act="adminOn">Open the console</button>${WS.admin ? `<button class="btn ghost" data-act="adminOff">Leave super admin</button>` : ""}</div></div>` : ""}
   <div class="card stack-s"><h3>Share a summary</h3><p class="small">${esc(shareText())}</p><p class="small muted">No names are included.</p>
     <div class="row"><a class="btn" href="https://wa.me/?text=${encodeURIComponent(shareText())}" target="_blank" rel="noopener">Share on WhatsApp</a><button class="btn" data-act="copySum">Copy summary</button></div></div>
-  <div class="card stack-s"><h3>Settings</h3><p class="small">${isParent() ? "Home" : esc(S.setup.school || "Class")} · ${GRADE_LABEL[S.setup.grade]} · ${S.setup.minutes} minutes × ${S.setup.days} days</p>
+  <div class="card stack-s"><h3>Settings</h3><p class="small">${isParent() ? "Home" : esc(S.setup.school || "Class")} · ${isParent() ? esc(GRADE_LABEL[lgrade(S.learners[0])] || "") : gradeMix()} · ${S.setup.minutes} minutes × ${S.setup.days} days</p>
     <div class="row"><button class="btn" data-act="editSetup">Change setup</button>${S.ui.confirmReset ? `<button class="btn danger" data-act="resetAll">Yes, erase everything</button><button class="btn ghost" data-act="cancelReset">Keep my data</button>` : `<button class="btn danger" data-act="askReset">Erase all data</button>`}</div></div>
-  <p class="small muted">Step2Read v1.1 · English · aligned to the KICD CBE designs (PP1–Grade 3) · printable packs come with the school web version.</p></div>`;
+  <p class="small muted">Step2Read v1.4 · English · aligned to the KICD CBE designs (PP1–Grade 3) · printable packs come with the school web version.</p></div>`;
 }
 
 // ------------------------------------------------------------------ school–home link (WhatsApp codes, no server)
@@ -1457,9 +1496,9 @@ function pendingChecks(ln) { return ((ln.home && ln.home.checks) || []).filter((
 // ---- teacher side
 function enrolPayload(ln) {
   const L = linkOf(ln); const g = groupOf(ln.id);
-  return { t: "E", v: 1, cid: ensureCid(), lid: ln.id, n: ln.name, gr: S.setup.grade, sch: S.setup.school || "", tn: S.setup.name || "", tp: S.setup.phone || "",
+  return { t: "E", v: 1, cid: ensureCid(), lid: ln.id, n: ln.name, gr: lgrade(ln), sch: S.setup.school || "", tn: S.setup.name || "", tp: S.setup.phone || "",
     hm: L.hm, hd: L.hd, ps: S.plan ? S.plan.start : today(), mk: S.plan ? S.plan.made : "",
-    grp: g ? { b: g.band, ti: g.title, w: encWeeks(g.weeks), e: g.eff, st: g.start, s5: g.sec5, s10: g.sec10, fl: g.fluency ? 1 : 0, w5: g.wcpm5, w10: g.wcpm10, wn: g.wcpmNow, te: g.terms, x: g.flagged.includes(ln.id) ? 1 : 0 } : null,
+    grp: g ? { b: g.band, ti: g.title, w: encWeeks(g.weeks), e: g.eff, st: g.start, s5: g.sec5, s10: g.sec10, fl: g.fluency ? 1 : 0, u0: g.u0 || "", w5: g.wcpm5, w10: g.wcpm10, wn: g.wcpmNow, x: g.flagged.includes(ln.id) ? 1 : 0 } : null,
     as: (ln.assessments || []).map(cA), rv: ((ln.home && ln.home.checks) || []).filter((c) => c.status !== "pending").map((c) => [c.date, c.level, c.status]),
     note: L.note || "", at: today() };
 }
@@ -1548,13 +1587,13 @@ function applyEnrol(p) {
   const keepLog = wasLinked && S.link.cid === p.cid ? S.homeLog || [] : (prev ? S.homeLog || [] : []);
   S.mode = "parent";
   S.link = { cid: p.cid, lid: p.lid, tn: p.tn, tp: p.tp, sch: p.sch, at: p.at, note: p.note, lastSent: wasLinked && S.link.cid === p.cid ? S.link.lastSent : "" };
-  S.setup = { name: (S.setup && S.setup.name) || "Parent", grade: p.gr, minutes: p.hm, days: p.hd };
+  S.setup = { name: (S.setup && S.setup.name) || "Parent", minutes: p.hm, days: p.hd };
   const checks = carry.map((c) => { const r = (p.rv || []).find((x) => x[0] === c.date && x[1] === c.level); return r ? { ...c, status: r[2], sent: true } : c; });
-  S.learners = [{ id: p.lid, name: p.n, assessments: (p.as || []).map(uA), homeChecks: checks }];
+  S.learners = [{ id: p.lid, name: p.n, grade: p.gr || "", assessments: (p.as || []).map(uA), homeChecks: checks }];
   const G = p.grp;
   const gw = G ? { band: G.b, title: G.ti, learnerIds: [p.lid], levels: [], eff: G.e, start: G.st, flagged: G.x ? [p.lid] : [], weeks: decWeeks(G.w), sec5: G.s5, sec10: G.s10,
-    wcpmNow: G.wn, wcpm5: G.w5, wcpm10: G.w10, fluency: !!G.fl, compFocus: false, terms: G.te } : null;
-  S.plan = { v: 2, linked: true, start: p.ps, made: p.mk, grade: p.gr, minutes: p.hm, days: p.hd, groups: gw ? [gw] : [], atLevel: gw ? [] : [p.lid], warnings: [] };
+    wcpmNow: G.wn, wcpm5: G.w5, wcpm10: G.w10, fluency: !!G.fl, compFocus: false, u0: G.u0 || "" } : null;
+  S.plan = { v: 3, linked: true, start: p.ps, made: p.mk, grade: p.gr, minutes: p.hm, days: p.hd, groups: gw ? [gw] : [], atLevel: gw ? [] : [p.lid], warnings: [] };
   S.homeLog = keepLog; save();
 }
 function reportPayload() {
@@ -1588,7 +1627,7 @@ function vHomeLinked() {
     ${wp ? `<p><b>This week (week ${w}):</b> ${esc(wp.label)}</p><div class="wgrid" style="grid-template-columns:repeat(5,minmax(0,1fr))">${[1, 2, 3, 4, 5].map((d) => `<span class="small muted" style="text-align:center;font-weight:600">Day ${d}</span>`).join("")}${wp.days.map((dd, i) => `<button class="fc ${i + 1 === sd ? "on" : ""} ${hdays.includes(i + 1) ? "" : "off"}" data-act="openDay" data-v="${i + 1}">${focusCell(dd)}</button>`).join("")}</div>
       <p class="small muted">Dashed days are school only. Home practice repeats the same lesson after school, so ${esc(ln.name)} is never learning two different things at once.</p>`
       : `<p>${esc(ln.name)} reads at grade level. At home: read storybooks together and talk about them.</p>`}
-    ${a && a.wcpm ? `<p class="small">Reads <b>${a.wcpm}</b> words a minute at school (${GRADE_LABEL[S.plan.grade]} target: ${targetWcpm(S.plan.grade)}).</p>` : ""}
+    ${a && a.wcpm ? `<p class="small">Reads <b>${a.wcpm}</b> words a minute at school (${GRADE_LABEL[lgrade(ln) || a.grade] || ""} benchmark: ${targetWcpm(lgrade(ln) || a.grade || "")}).</p>` : ""}
     ${S.link.note ? `<p class="small"><b>Note from the teacher:</b> ${esc(S.link.note)}</p>` : ""}</div>
   <div class="card stack-s" id="report"><h3>At home this week</h3>
     <div class="hdays">${[1, 2, 3, 4, 5].map((d) => { const x = wk.find((y) => y[1] === d); return `<span class="${x ? "done " + x[3] : hdays.includes(d) ? "" : "off"}">D${d}<small>${x ? RATE[x[3]] : hdays.includes(d) ? "–" : "school"}</small></span>`; }).join("")}</div>
@@ -1672,7 +1711,7 @@ function wsSummary(id) {
   const s = wsData(id); if (!s || !s.mode) return "Empty";
   if (s.mode === "parent") { const c = s.learners && s.learners[0]; return `${c ? esc(c.name) : "No child yet"}${s.link ? ` · linked to ${esc(s.link.tn || "a teacher")}` : " · not linked"}`; }
   const n = (s.learners || []).length; const ck = (s.learners || []).filter((l) => l.assessments && l.assessments.length).length;
-  return `${esc(s.setup.school || "Class")} · ${GRADE_LABEL[s.setup.grade] || ""} · ${n} learner${n === 1 ? "" : "s"}, ${ck} checked${s.plan ? " · plan made" : ""}`;
+  return `${esc(s.setup.school || "Class")} · ${n} learner${n === 1 ? "" : "s"}, ${ck} checked${s.plan ? " · plan made" : ""}`;
 }
 function vAdmin() {
   const ids = Object.keys(PORTALS).filter((id) => id !== "main" || wsData("main"));
@@ -1699,7 +1738,7 @@ function openPortal(id) {
   if (s && s.mode) { S = s; S.ui = { screen: "home" }; render(); window.scrollTo(0, 0); return; }
   if (P.example === "p") { buildParentExample(); render(); return; }
   if (P.example) { loadExample(P.example); render(); return; }
-  S = blank(); S.setup = { grade: "G2", minutes: P.role === "parent" ? 15 : 30, days: 5 };
+  S = blank(); S.setup = { minutes: P.role === "parent" ? 15 : 30, days: 5 };
   S.ui = { screen: P.role ? "setup" : "welcome", mode: P.role }; render(); window.scrollTo(0, 0);
 }
 function buildParentExample() {   // parent example linked to the Grade 2 example workspace, so the two can talk to each other
@@ -1870,16 +1909,17 @@ const Gate = (() => {
     return `<div class="stack">
       <div class="row" style="justify-content:space-between;align-items:flex-end"><div class="stack-s"><p class="label">${ROLE_LABEL[p.role]} · ${scope}</p><h1>Programme portal</h1></div>
         <div class="row"><button class="btn mat" data-g="refresh" ${G.loading ? "disabled" : ""}>${G.loading ? "Refreshing…" : "Refresh"}</button><button class="btn mat primary" data-g="toApp">Open the reading app</button></div></div>
-      ${sup && D.hasDemo ? `<div class="${G.demo ? "banner" : "banner info"} row" style="justify-content:space-between"><span class="small">${G.demo ? "<b>Demo mode.</b> Showing the example class only. Real programme results are hidden." : "A demo class is available for presentations. It is never counted in programme results and only you can see it."}</span><button class="btn mat ${G.demo ? "" : "maize"}" data-g="demo">${G.demo ? "Exit demo" : "Show demo class"}</button></div>` : ""}
+      ${sup && D.hasDemo ? `<div class="${G.demo ? "banner" : "banner info"} row" style="justify-content:space-between"><span class="small">${G.demo ? "<b>Demo and test data.</b> Showing the demo class (DEMO) and classes from your super admin account (TEST). Real programme results are hidden." : "The demo class and anything you enter from this super admin account are kept as test data: never counted in programme results, and only you can see them."}</span><button class="btn mat ${G.demo ? "" : "maize"}" data-g="demo">${G.demo ? "Back to programme results" : "Show demo and test data"}</button></div>` : ""}
       <nav class="ptabs" aria-label="Portal sections">${tabs.map(([k, l]) => `<button data-g="tab" data-v="${k}" ${G.tab === k ? 'aria-current="page"' : ""}>${l}</button>`).join("")}</nav>
       ${note()}${body}
       ${D.at ? `<p class="small muted">Updated ${fmt(D.at)}. Each class shows its results as of its phone's last sync.</p>` : ""}</div>`;
   }
-  // The demo class (school code DEMO, super admin only) never mixes with real programme numbers.
+  // Not programme data: the demo class (DEMO) and anything entered from a super admin account (TEST).
+  // Only the super admin sees them, and they never mix with real programme numbers.
   function scope() {
     const D = G.data; if (!D || !D.allLearners) return;
-    D.hasDemo = D.allLearners.some((l) => l.school_code === "DEMO");
-    D.learners = D.allLearners.filter((l) => (G.demo ? l.school_code === "DEMO" : l.school_code !== "DEMO"));
+    D.hasDemo = D.allLearners.some((l) => NOT_REAL.includes(l.school_code));
+    D.learners = D.allLearners.filter((l) => (G.demo ? NOT_REAL.includes(l.school_code) : !NOT_REAL.includes(l.school_code)));
     const agg = (rows, code) => { const re = rows.filter((r) => r.checks >= 2), up = re.filter((r) => r.levels_gained >= 1);
       return { school_code: code, classes: new Set(rows.map((r) => r.class_id)).size, children: rows.length, with_baseline: rows.filter((r) => r.checks >= 1).length,
         rechecked: re.length, moved_up: up.length, moved_up_pct: re.length ? Math.round((100 * up.length) / re.length) : null,
@@ -2044,7 +2084,7 @@ const Gate = (() => {
     csv: async (el) => {
       if (el.dataset.v === "learners") { const L = G.data.learners.filter((l) => !G.filter || l.school_code === G.filter); download(`step2read-children-${today()}.csv`, csv(L)); return; }
       el.disabled = true; el.textContent = "Preparing…";
-      const r = await Auth.get("s2r_checks?select=school_code,facilitator,school,child_id,child_name,check_date,form,grade,level,words_per_minute,accuracy_pct,comprehension,full_diagnostic,source,gap_units&order=school_code,facilitator,child_name,check_date" + (G.filter ? "&school_code=eq." + encodeURIComponent(G.filter) : G.demo ? "&school_code=eq.DEMO" : "&school_code=neq.DEMO"));
+      const r = await Auth.get("s2r_checks?select=school_code,facilitator,school,child_id,child_name,check_date,form,grade,level,words_per_minute,accuracy_pct,comprehension,full_diagnostic,source,gap_units&order=school_code,facilitator,child_name,check_date" + (G.filter ? "&school_code=eq." + encodeURIComponent(G.filter) : G.demo ? "&school_code=in.(" + NOT_REAL.join(",") + ")" : "&school_code=not.in.(" + NOT_REAL.join(",") + ")"));
       if (r.ok) download(`step2read-checks-${today()}.csv`, csv(r.j || [])); else say("The download couldn't be prepared. Try again.");
       draw();
     },
@@ -2142,7 +2182,10 @@ document.addEventListener("click", async (e) => {
   const gt = e.target.closest("[data-go]"); if (gt) { const k = gt.dataset.go; go(k); return; }
   const el = e.target.closest("[data-act]"); if (!el) return; const act = el.dataset.act; const R = S.run;
   const actions = {
-    mode: () => { S.ui.mode = el.dataset.v; S.setup = { grade: "G2", minutes: el.dataset.v === "parent" ? 15 : 30, days: 5 }; S.learners = []; go("setup", { mode: el.dataset.v }); },
+    ggAdd: () => { $("#gglist").insertAdjacentHTML("beforeend", ggHTML({ grade: "", names: "" })); const t = [...document.querySelectorAll("#gglist .gg-grade")].pop(); if (t) t.focus(); },
+    ggRemove: () => { const all = document.querySelectorAll("#gglist .gg"); const box = el.closest(".gg"); if (all.length > 1) box.remove(); else { box.querySelector(".gg-names").value = ""; box.querySelector(".gg-grade").value = ""; } },
+    gradesOk: () => { delete S.setup.gradeCheck; save(); render(); },
+    mode: () => { S.ui.mode = el.dataset.v; S.setup = { minutes: el.dataset.v === "parent" ? 15 : 30, days: 5 }; S.learners = []; go("setup", { mode: el.dataset.v }); },
     example: () => { if (WS.admin) { openPortal({ g1: "ex-g1", g2: "ex-g2", p: "ex-p" }[el.dataset.v || "g2"]); return; } if (el.dataset.v === "p") loadParentExample(); else loadExample(el.dataset.v || "g2"); render(); window.scrollTo(0, 0); },
     syncNow: () => { if (!Sync.enabled()) { go("more"); return; } Sync.run(true); },
     cancelSetup: () => go(S.mode ? "home" : "welcome"),
@@ -2214,21 +2257,31 @@ document.addEventListener("input", (e) => {
     L[f] = f === "hm" || f === "hd" ? +t.value : t.value; save(); const m = enrolMessage(ln); const a = $("#waSend"); if (a) a.href = waHref(L.phone, m); const b = $("#msgBox"); if (b) b.value = m; }
   if (t.id === "draftNote") { S.draftNote = t.value; save(); const a = $("#waReport"); if (a) a.href = waHref(S.link.tp, reportMessage()); }
 });
-document.addEventListener("change", (e) => { if (e.target.id === "weekSel") { S.ui.week = +e.target.value; render(); } });
+document.addEventListener("change", (e) => {
+  if (e.target.id === "weekSel") { S.ui.week = +e.target.value; render(); }
+  if (e.target.dataset && e.target.dataset.lgrade) { const ln = S.learners.find((x) => x.id === e.target.dataset.lgrade); if (ln) { ln.grade = e.target.value; save(); S.ui.flash = `${ln.name} is now in ${GRADE_LABEL[ln.grade]}. Their next reading check will use it.`; render(); } }
+});
 document.addEventListener("submit", (e) => {
   if (e.target.id !== "setupForm") return; e.preventDefault();
   const p = S.ui.mode === "parent"; const v = (id) => (document.getElementById(id) || {}).value || "";
   S.mode = p ? "parent" : "teacher"; S.example = false;
-  S.setup = { ...(S.setup || {}), name: v("f_name").trim(), school: p ? "" : v("f_school").trim(), grade: v("f_grade"), minutes: +v("f_min"), days: +v("f_days") };
+  let groups = [];
+  if (!p) {
+    groups = readGradeGroups();
+    if (groups.some((g) => g.names.length && !g.grade)) { const m = $("#ggMsg"); m.hidden = false; m.textContent = "Choose a grade for each group of names."; m.scrollIntoView({ block: "center" }); return; }
+  } else if (!v("f_grade")) { alertBox("Choose your child's grade."); return; }
+  S.setup = { ...(S.setup || {}), name: v("f_name").trim(), school: p ? "" : v("f_school").trim(), minutes: +v("f_min"), days: +v("f_days") };
+  delete S.setup.grade;
   if (!p) { S.setup.code = (Auth.profile() || {}).school_code || ""; S.setup.homeMinutes = +v("f_hm") || 15; S.setup.homeDays = +v("f_hd") || 5; S.setup.phone = v("f_phone").trim(); }
-  if (p) { const nm = v("f_child").trim() || "My child"; if (S.learners[0]) S.learners[0].name = nm; else S.learners = [{ id: uid(), name: nm, assessments: [] }]; }
-  else { const names = v("f_names").split("\n").map((x) => x.trim()).filter(Boolean); const keep = Object.fromEntries(S.learners.map((l) => [l.name, l]));
-    S.learners = names.map((n) => keep[n] || { id: uid(), name: n, assessments: [] }); }
+  if (p) { const nm = v("f_child").trim() || "My child"; if (S.learners[0]) { S.learners[0].name = nm; S.learners[0].grade = v("f_grade"); } else S.learners = [{ id: uid(), name: nm, grade: v("f_grade"), assessments: [] }]; }
+  else { const keep = Object.fromEntries(S.learners.map((l) => [l.name, l])); const seen = new Set(); const out = [];
+    for (const g of groups) for (const n of g.names) { if (seen.has(n)) continue; seen.add(n); const ln = keep[n] || { id: uid(), name: n, assessments: [] }; ln.grade = g.grade; out.push(ln); }
+    S.learners = out; delete S.setup.gradeCheck; }
   if (!Gate.weeks()) { S.setup.weeks = Math.max(2, Math.min(30, +v("f_weeks") || 10)); setCycle(S.setup.weeks); if (S.plan && S.learners.some(latest)) makePlan(); }
   save(); go("home");
 });
 setCycle(Gate.weeks() || (S.setup && S.setup.weeks) || 10);
-if (S.plan && (S.plan.v !== 2 || (S.plan.weeks || 10) !== CYCLE) && !(S.link && S.mode === "parent") && S.learners.some(latest)) { try { makePlan(); } catch (e) {} }
+if (S.plan && ((S.plan.v || 0) < 2 || (S.plan.weeks || 10) !== CYCLE) && !(S.link && S.mode === "parent") && S.learners.some(latest)) { try { makePlan(); } catch (e) {} }
 try { const c = new URLSearchParams(location.search).get("code"); if (c) S.ui = { screen: "paste", pre: "S2R-" + c }; } catch (e) {}
 Gate.start();
 Sync.run(false);
