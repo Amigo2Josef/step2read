@@ -264,6 +264,8 @@ const Auth = (() => {
   const K = "step2read.auth";
   let a = null; try { a = JSON.parse(localStorage.getItem(K) || "null"); } catch (e) {}
   let link = null; // what an email link asked for: { type: "invite" | "recovery" } or { error }
+  let join = null; // a WhatsApp invite or reset link: { kind: "invite" | "reset", vtype, hash }. Redeemed only when the person taps the button,
+                   // because WhatsApp opens links itself to build a preview, and that would use up a one-time sign-in link.
   const keep = () => { try { a ? localStorage.setItem(K, JSON.stringify(a)) : localStorage.removeItem(K); } catch (e) {} };
   const sub = (t) => { try { return JSON.parse(atob(t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))).sub; } catch (e) { return null; } };
   function setSession(s) {
@@ -276,12 +278,13 @@ const Auth = (() => {
   // Links from invite and reset emails arrive as #access_token=...&type=invite|recovery
   try {
     const h = new URLSearchParams(location.hash.slice(1));
-    if (h.get("access_token")) { setSession({ access_token: h.get("access_token"), refresh_token: h.get("refresh_token"), expires_at: h.get("expires_at"), expires_in: h.get("expires_in") }); link = { type: h.get("type") || "invite" }; a.pw = link.type; keep(); }
+    if (h.get("join")) { const [kind, vtype, hash] = h.get("join").split("."); if (hash && ["invite", "recovery"].includes(vtype)) join = { kind: kind === "reset" ? "reset" : "invite", vtype, hash }; else link = { error: "This link is incomplete. Ask your programme lead to send it again." }; history.replaceState(null, "", location.pathname + location.search); }
+    else if (h.get("access_token")) { setSession({ access_token: h.get("access_token"), refresh_token: h.get("refresh_token"), expires_at: h.get("expires_at"), expires_in: h.get("expires_in") }); link = { type: h.get("type") || "invite" }; a.pw = link.type; keep(); }
     else if (h.get("error") || h.get("error_code")) link = { error: h.get("error_code") === "otp_expired" ? "This link has expired or has already been used. Ask your programme lead to send a new one." : (h.get("error_description") || "This link did not work.").replace(/\+/g, " ") };
     if (link) history.replaceState(null, "", location.pathname + location.search);
   } catch (e) {}
   // An email link opened while the app is already open in this tab: reload so it is read fresh.
-  window.addEventListener("hashchange", () => { if (/access_token=|error_code=|error=/.test(location.hash)) location.reload(); });
+  window.addEventListener("hashchange", () => { if (/access_token=|error_code=|error=|join=/.test(location.hash)) location.reload(); });
 
   async function api(path, opts = {}, token) {
     const headers = { apikey: SB_KEY, "Content-Type": "application/json" };
@@ -314,9 +317,16 @@ const Auth = (() => {
     if (r.status === 401) { const t = await token(true); if (t) return refreshProfile(); }
     return null;
   }
+  async function redeem() {   // swap the WhatsApp link for a sign-in, now that a person has tapped the button
+    if (!join) return { error: "This link has already been used here." };
+    const r = await api("/auth/v1/verify", { method: "POST", body: { type: join.vtype, token_hash: join.hash } });
+    if (r.ok && r.j && r.j.access_token) { setSession(r.j); a.pw = join.kind === "reset" ? "recovery" : "invite"; keep(); join = null; return { ok: true }; }
+    if (r.offline) return { error: "Setting up needs the internet. Connect and tap the button again." };
+    return { error: "This link has expired or has already been used. Ask your programme lead to send you a new one on WhatsApp." };
+  }
   function signOut() { const t = a && a.access_token; if (t && navigator.onLine) api("/auth/v1/logout", { method: "POST" }, t); a = null; keep(); }
   return {
-    get s() { return a; }, get link() { return link; }, clearLink() { link = null; },
+    get s() { return a; }, get link() { return link; }, clearLink() { link = null; }, get join() { return join; }, redeem,
     signedIn: () => !!(a && a.access_token), profile: () => (a && a.profile) || null, school: () => (a && a.school) || null, uid: () => (a && a.user_id) || null,
     setSession, keep, token, api, rpc, get, fn, refreshProfile, signOut,
   };
@@ -378,7 +388,7 @@ S = load();
 const SYNC_URL = "https://yfinjbgozqmtmlensjxe.supabase.co/rest/v1/rpc/s2r_sync"; // Step2Read results database (Supabase)
 const SYNC_PUBLIC_KEY = SB_KEY; // results are accepted only from a signed-in, active account
 const SYNC_KEY = "s2r-pilot-2026";
-const APP_VERSION = "1.5";
+const APP_VERSION = "1.5.2";
 const Sync = (() => {
   const META = "step2read.sync." + (Auth.uid() || "none");
   let meta = {}; try { meta = JSON.parse(localStorage.getItem(META) || "{}"); } catch (e) {}
@@ -1782,6 +1792,7 @@ const Gate = (() => {
 
   // Which screen should show? null means the reading app.
   function route() {
+    if (Auth.join) { G.screen = "join"; return; }
     if (Auth.link && Auth.link.error) { G.screen = "signin"; G.err = Auth.link.error; Auth.clearLink(); return; }
     if (Auth.link && Auth.link.type) Auth.clearLink();
     if (Auth.s && Auth.s.pw && !Auth.s.expired) { G.linkType = Auth.s.pw; G.screen = "setpw"; return; } // password not chosen yet
@@ -1799,7 +1810,7 @@ const Gate = (() => {
 
   function paintChips() {
     const a = document.getElementById("acctchip"); if (!a) return; const p = me();
-    a.hidden = !p || ["signin", "setpw", "forgot", "loading"].includes(G.screen);
+    a.hidden = !p || ["signin", "setpw", "forgot", "loading", "join"].includes(G.screen);
     if (!p) return;
     a.textContent = isStaff(p) ? (G.screen === "portal" ? first(p.full_name) : "Portal") : first(p.full_name);
     a.dataset.g = isStaff(p) && G.screen !== "portal" ? "toPortal" : "account";
@@ -1810,13 +1821,22 @@ const Gate = (() => {
   }
   function draw() {
     chrome();
-    const f = { signin: vSignin, forgot: vForgot, setpw: vSetpw, profile: vProfile, blocked: vBlocked, loading: vLoading, account: vAccount, portal: vPortal }[G.screen] || vSignin;
+    const f = { join: vJoin, signin: vSignin, forgot: vForgot, setpw: vSetpw, profile: vProfile, blocked: vBlocked, loading: vLoading, account: vAccount, portal: vPortal }[G.screen] || vSignin;
     document.getElementById("app").innerHTML = f() + `<p class="foot-note">Step2Read · © Linchpin Education</p>`;
     const af = document.querySelector("[data-autofocus]"); if (af && !G.busy) af.focus();
   }
   const note = () => (G.err ? `<div class="banner" role="alert">${esc(G.err)}</div>` : "") + (G.msg ? `<div class="banner info" role="status">${esc(G.msg)}</div>` : "");
   const pwField = (id, label, auto) => `<label class="f">${label}<span class="pw"><input id="${id}" type="password" autocomplete="${auto}" minlength="8" required><button type="button" class="btn ghost mat" data-g="peek" data-v="${id}">Show</button></span></label>`;
 
+  function vJoin() {
+    const inv = !Auth.join || Auth.join.kind !== "reset";
+    return `<form class="stack auth" id="g_join" novalidate>
+      <div class="stack-s"><p class="label">${inv ? "Welcome to Step2Read" : "Step2Read"}</p><h1>${inv ? "Set up your account" : "Choose a new password"}</h1>
+      <p class="muted">${inv ? "Your programme lead has added you to Step2Read. Tap the button to start: you'll choose a password, then sign in with your phone number." : "Tap the button to choose a new password."}</p></div>
+      ${note()}
+      <div class="card stack"><button class="btn primary block" ${G.busy ? "disabled" : ""}>${G.busy ? "One moment…" : inv ? "Set up my account" : "Choose a new password"}</button>
+      <p class="small muted">The link works once. If it says it has expired, ask your programme lead to send a new one.</p></div></form>`;
+  }
   function vLoading() { return `<div class="card stack-s"><h2>Signing you in…</h2><p class="muted">One moment.</p></div>`; }
   function vSignin() {
     return `<form class="stack auth" id="g_signin" novalidate>
@@ -2132,6 +2152,11 @@ const Gate = (() => {
       const phone = val("g_phone"); if (!phone) { say("Enter your phone number."); return; }
       const r = await Auth.fn({ action: "forgot", phone }, false);
       if (r.j && r.j.ok) { G.screen = "signin"; say("", r.j.message); } else say("Couldn't reach Step2Read. Check the internet and try again.");
+    }),
+    g_join: () => busy(async () => {
+      const r = await Auth.redeem();
+      if (r.ok) { say(); G.linkType = Auth.s.pw; G.screen = "setpw"; return; }
+      G.screen = Auth.join ? "join" : "signin"; say(r.error);
     }),
     g_setpw: () => busy(async () => {
       const a = val("g_pw"), b = val("g_pw2");
