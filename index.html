@@ -388,7 +388,7 @@ S = load();
 const SYNC_URL = "https://yfinjbgozqmtmlensjxe.supabase.co/rest/v1/rpc/s2r_sync"; // Step2Read results database (Supabase)
 const SYNC_PUBLIC_KEY = SB_KEY; // results are accepted only from a signed-in, active account
 const SYNC_KEY = "s2r-pilot-2026";
-const APP_VERSION = "1.5.2";
+const APP_VERSION = "1.5.3";
 const Sync = (() => {
   const META = "step2read.sync." + (Auth.uid() || "none");
   let meta = {}; try { meta = JSON.parse(localStorage.getItem(META) || "{}"); } catch (e) {}
@@ -579,9 +579,11 @@ function makePlan() {
     const banded = {};
     for (const l of learners) { const b = bandOf(l.level); if (b) (banded[b] = banded[b] || []).push(l); else atLevel.push(l.id); }
     for (const b of Object.keys(banded).map(Number).sort()) {
-      if (banded[b] && banded[b].length < 3 && Object.keys(banded).length > 1) {
-        const t = banded[b + 1] ? b + 1 : b - 1; banded[t] = banded[b].concat(banded[t]); delete banded[b];
-        warnings.push(`Band ${b} had fewer than 3 learners, so they joined band ${t}.`);
+      // A band with fewer than 3 learners joins a neighbouring band. If no neighbouring band exists (e.g. only
+      // bands 1 and 3), it stays on its own: beginners are never merged with fluent readers.
+      if (banded[b] && banded[b].length < 3) {
+        const t = banded[b + 1] ? b + 1 : banded[b - 1] ? b - 1 : null;
+        if (t) { banded[t] = banded[b].concat(banded[t]); delete banded[b]; warnings.push(`Band ${b} had fewer than 3 learners, so they joined band ${t}.`); }
       }
     }
     const bl = Object.keys(banded).map(Number).sort();
