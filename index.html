@@ -253,10 +253,10 @@ const DATA = {"say":{"a":"/a/ as in ant: mouth open, short sound","m":"lips toge
 // Results stay on the phone and work offline; they are sent to the programme only from a signed-in account.
 const SB_URL = "https://yfinjbgozqmtmlensjxe.supabase.co";
 const SB_KEY = "sb_publishable_LJTAQeIaT8pYEBnqCe2JUQ_Ka3Az_bk"; // public key: every read is limited by the signed-in person's access
-const ROLE_LABEL = { super_admin: "Super admin", linchpin_admin: "Linchpin admin", school_admin: "School admin", facilitator: "Facilitator" };
+const ROLE_LABEL = { super_admin: "Super admin", linchpin_admin: "Programme admin", school_admin: "School admin", facilitator: "Facilitator" };
 const ROLE_HELP = {
   super_admin: "Everything: all schools, all people, all results.",
-  linchpin_admin: "Read-only view of the schools you assign.",
+  linchpin_admin: "Everything across all schools (schools, people, results), except making someone a super admin. What they enter is kept as test data.",
   school_admin: "One school: invite its facilitators and see its results.",
   facilitator: "Runs reading sessions and records checks for their own classes.",
 };
@@ -334,6 +334,7 @@ const Auth = (() => {
 const NOT_REAL = ["DEMO", "TEST", "PRACTICE"];   // never programme data: the demo class, super admin entries (TEST) and onboarding practice classes (PRACTICE)
 const isPhoneOnly = (e) => /@phone\.step2read\.invalid$/.test(String(e || ""));   // placeholder login address for people invited by WhatsApp (never emailed)
 const phoneLocal = (ph) => (ph ? "0" + String(ph).slice(3) : "");
+const isProg = (p) => !!p && ["super_admin", "linchpin_admin"].includes(p.role);   // programme level: super admin and programme admins
 const isStaff = (p) => !!p && ["super_admin", "linchpin_admin", "school_admin"].includes(p.role);
 
 
@@ -388,7 +389,7 @@ S = load();
 const SYNC_URL = "https://yfinjbgozqmtmlensjxe.supabase.co/rest/v1/rpc/s2r_sync"; // Step2Read results database (Supabase)
 const SYNC_PUBLIC_KEY = SB_KEY; // results are accepted only from a signed-in, active account
 const SYNC_KEY = "s2r-pilot-2026";
-const APP_VERSION = "1.6";
+const APP_VERSION = "1.6.1";
 const Sync = (() => {
   const META = "step2read.sync." + (Auth.uid() || "none");
   let meta = {}; try { meta = JSON.parse(localStorage.getItem(META) || "{}"); } catch (e) {}
@@ -411,7 +412,7 @@ const Sync = (() => {
     return { app: APP_VERSION, key: SYNC_KEY, device: meta.device, store: st.gen ? id + "." + st.gen : id, mode: d.mode,
       facilitator: (Auth.profile() || {}).full_name || st.name || "", school: st.school || "", schoolCode: (Auth.profile() || {}).school_code || "", grade: "", minutes: st.minutes || "", days: st.days || "", phone: st.phone || "",
       planStart: d.plan ? d.plan.start || "" : "",
-      test: (Auth.profile() || {}).role === "super_admin",
+      test: isProg(Auth.profile()),
       learners: d.learners.map((l) => ({ id: l.id, name: l.name || "", grade: l.grade || "", assessments: (l.assessments || []).map((a) => ({
         id: a.id, date: a.date, form: a.form, grade: a.grade, level: a.level, startUnit: a.startUnit, wcpm: a.wcpm || 0,
         acc: a.acc ?? "", comp: a.comp ?? "", gaps: a.gaps || [], diagnosed: !!a.diagnosed, source: a.source || "school" })) })),
@@ -758,7 +759,7 @@ function vWelcome() {
     </ol></div>
   <button class="card btn" data-go="paste" style="justify-content:flex-start;text-align:left;display:grid;gap:4px">
     <span class="label">For parents</span><h3>I have a code from my child's teacher</h3><span class="muted small" style="font-weight:400">Link to your child's class: home practice that matches what they learn at school each day.</span></button>
-  ${(Auth.profile() || {}).role === "super_admin" ? `<div class="stack-s"><p class="label">Demo (only you see this)</p>
+  ${isProg(Auth.profile()) ? `<div class="stack-s"><p class="label">Demo (programme admins only)</p>
     <button class="btn ghost" style="justify-content:flex-start" data-act="example" data-v="g2">${esc(EXAMPLES.g2.label)} →</button></div>` : ""}
   <p class="muted small">Results are saved on this phone first, so everything works offline. When you are online they are sent securely to your programme.</p>
   ${BUILD_MODE ? `<button class="btn ghost" style="justify-content:flex-start" data-act="adminOn">Super admin (build mode): open both portals →</button>` : ""}
@@ -1938,10 +1939,10 @@ const Gate = (() => {
     draw();
   }
   function vPortal() {
-    const p = me(); const sup = p.role === "super_admin";
+    const p = me(); const sup = isProg(p);
     const tabs = [["overview", "Overview"], ["results", "Results"], ["people", "People"]].concat(sup ? [["schools", "Schools"]] : []);
     if (!G.data && !G.loading) setTimeout(() => loadData(), 0);
-    const scope = sup ? "All schools" : p.role === "school_admin" ? esc(p.school_code) : (p.linchpin_schools || []).length ? esc(p.linchpin_schools.join(", ")) : "No schools assigned yet";
+    const scope = sup ? "All schools" : esc(p.school_code || "");
     const D = G.data || {};
     let body = "";
     if (!G.data) body = `<div class="card"><p class="muted">Loading programme data…</p></div>`;
@@ -1951,7 +1952,7 @@ const Gate = (() => {
     return `<div class="stack">
       <div class="row" style="justify-content:space-between;align-items:flex-end"><div class="stack-s"><p class="label">${ROLE_LABEL[p.role]} · ${scope}</p><h1>Programme portal</h1></div>
         <div class="row"><button class="btn mat" data-g="refresh" ${G.loading ? "disabled" : ""}>${G.loading ? "Refreshing…" : "Refresh"}</button><button class="btn mat primary" data-g="toApp">Open the reading app</button></div></div>
-      ${sup && D.hasDemo ? `<div class="${G.demo ? "banner" : "banner info"} row" style="justify-content:space-between"><span class="small">${G.demo ? "<b>Demo and test data.</b> Showing the demo class (DEMO), classes from your super admin account (TEST) and onboarding practice classes (PRACTICE). Real programme results are hidden." : "The demo class and anything you enter from this super admin account are kept as test data: never counted in programme results, and only you can see them."}</span><button class="btn mat ${G.demo ? "" : "maize"}" data-g="demo">${G.demo ? "Back to programme results" : "Show demo and test data"}</button></div>` : ""}
+      ${sup && D.hasDemo ? `<div class="${G.demo ? "banner" : "banner info"} row" style="justify-content:space-between"><span class="small">${G.demo ? "<b>Demo and test data.</b> Showing the demo class (DEMO), classes from your super admin account (TEST) and onboarding practice classes (PRACTICE). Real programme results are hidden." : "The demo class, onboarding practice, and anything entered from programme-level accounts (super admin and programme admins) are kept as test data: never counted in programme results, and only programme admins can see them."}</span><button class="btn mat ${G.demo ? "" : "maize"}" data-g="demo">${G.demo ? "Back to programme results" : "Show demo and test data"}</button></div>` : ""}
       <nav class="ptabs" aria-label="Portal sections">${tabs.map(([k, l]) => `<button data-g="tab" data-v="${k}" ${G.tab === k ? 'aria-current="page"' : ""}>${l}</button>`).join("")}</nav>
       ${note()}${body}
       ${D.at ? `<p class="small muted">Updated ${fmt(D.at)}. Each class shows its results as of its phone's last sync.</p>` : ""}</div>`;
@@ -2030,19 +2031,19 @@ const Gate = (() => {
     try { window.open(waHref(j.phone, waMessage(G.share)), "_blank", "noopener"); } catch (e) {}
   }
   function pPeople(D, p) {
-    const canAdd = p.role === "super_admin" || p.role === "school_admin";
+    const canAdd = isProg(p) || p.role === "school_admin";
     const list = D.people.slice().sort((a, b) => (a.status === "disabled") - (b.status === "disabled"));
     return `${shareCard()}${canAdd ? inviteCard(D, p) : ""}
       <div class="card"><div class="list">${list.map((x) => personRow(x, p, D)).join("") || `<p class="muted">No one yet.</p>`}</div></div>`;
   }
   function roleOpts(p, sel) {
-    const roles = p.role === "super_admin" ? ["facilitator", "school_admin", "linchpin_admin", "super_admin"] : ["facilitator"];
+    const roles = p.role === "super_admin" ? ["facilitator", "school_admin", "linchpin_admin", "super_admin"] : p.role === "linchpin_admin" ? ["facilitator", "school_admin", "linchpin_admin"] : ["facilitator"];
     return roles.map((r) => `<option value="${r}" ${sel === r ? "selected" : ""}>${ROLE_LABEL[r]}</option>`).join("");
   }
   function schoolOpts(D, sel) { return `<option value="">Choose a school</option>` + D.schools.filter((s) => s.active).map((s) => `<option value="${esc(s.code)}" ${sel === s.code ? "selected" : ""}>${esc(s.code)} · ${esc(s.name)}</option>`).join(""); }
   function lpBoxes(D, id, on) { return D.schools.map((s) => `<label class="ck"><input type="checkbox" name="${id}" value="${esc(s.code)}" ${(on || []).includes(s.code) ? "checked" : ""}> ${esc(s.code)}</label>`).join("") || `<span class="small muted">Add schools first.</span>`; }
   function inviteCard(D, p) {
-    const sup = p.role === "super_admin";
+    const sup = isProg(p);
     if (!G.inviteOpen) return `<button class="btn primary" data-g="inviteOpen">+ Add a person</button>`;
     if (sup && !D.schools.length) return `<div class="banner info">Add a school first (Schools tab), then invite its people.</div>`;
     return `<form class="card stack" id="g_invite" novalidate><h3>Add a person</h3>
@@ -2052,20 +2053,18 @@ const Gate = (() => {
       <div class="grid2"><label class="f">Access level<select id="i_role">${roleOpts(p, "facilitator")}</select></label>
         ${sup ? `<label class="f" id="i_schoolbox">School<select id="i_school">${schoolOpts(D, "")}</select></label>` : `<p class="small muted" style="align-self:end">School: <b>${esc(p.school_code)}</b></p>`}</div>
       <p class="small muted" id="i_help">${ROLE_HELP.facilitator}</p>
-      ${sup ? `<div class="stack-s" id="i_lpbox" hidden><span class="small">Schools this Linchpin admin can see</span><div class="row">${lpBoxes(D, "i_lp", [])}</div></div>` : ""}
       <div class="row"><button class="btn primary" ${G.busy ? "disabled" : ""}>${G.busy ? "Making the invite…" : "Make invite and open WhatsApp"}</button><button type="button" class="btn ghost" data-g="inviteClose">Cancel</button></div></form>`;
   }
   function personRow(x, p, D) {
-    const sup = p.role === "super_admin";
+    const sup = isProg(p);
     const mine = x.user_id === p.user_id;
-    const canManage = !mine && (sup || (p.role === "school_admin" && x.role === "facilitator" && x.school_code === p.school_code));
+    const canManage = !mine && (p.role === "super_admin" || (p.role === "linchpin_admin" && x.role !== "super_admin") || (p.role === "school_admin" && x.role === "facilitator" && x.school_code === p.school_code));
     const st = { active: `<span class="hb ok">Active</span>`, invited: `<span class="hb warn">Invited</span>`, disabled: `<span class="hb">Switched off</span>` }[x.status];
-    const where = x.role === "linchpin_admin" ? ((x.linchpin_schools || []).join(", ") || "no schools yet") : x.school_code || "All schools";
+    const where = x.school_code || "All schools";
     const act = x.role === "facilitator" ? (x.last_sync ? `${x.children} children · last sync ${fmt(x.last_sync)}` : "No results synced yet") : "";
     let edit = "";
     if (G.edit === x.user_id && sup) edit = `<form class="stack-s editbox" id="g_edit" data-id="${x.user_id}" novalidate>
       <div class="grid2"><label class="f">Access level<select id="e_role">${roleOpts(p, x.role)}</select></label><label class="f" id="e_schoolbox" ${["super_admin", "linchpin_admin"].includes(x.role) ? "hidden" : ""}>School<select id="e_school">${schoolOpts(D, x.school_code)}</select></label></div>
-      <div class="stack-s" id="e_lpbox" ${x.role === "linchpin_admin" ? "" : "hidden"}><span class="small">Schools they can see</span><div class="row">${lpBoxes(D, "e_lp", x.linchpin_schools)}</div></div>
       <div class="row"><button class="btn primary mat" ${G.busy ? "disabled" : ""}>Save</button><button type="button" class="btn ghost mat" data-g="editClose">Cancel</button></div></form>`;
     return `<div class="li person"><div style="min-width:0"><div class="name">${esc(x.full_name)} ${st}${mine ? ` <span class="hb">You</span>` : ""}</div>
       <div class="small muted">${ROLE_LABEL[x.role]} · ${esc(where)}${x.phone ? ` · 0${esc(String(x.phone).slice(3))}` : ""}</div>
@@ -2091,7 +2090,7 @@ const Gate = (() => {
       <ul class="small" style="margin:0;padding-left:1.2em">
         <li><b>${people.length}</b> ${people.length === 1 ? "person's account" : "people's accounts"} at this school${people.length ? ` (${people.map((x) => esc(x.full_name)).join(", ")}). They will no longer be able to sign in` : ""}</li>
         <li><b>${classes}</b> ${classes === 1 ? "class" : "classes"} and the results of <b>${rows.length}</b> ${rows.length === 1 ? "child" : "children"}</li>
-        <li>the school from any Linchpin admin's list</li></ul>
+</ul>
       <p class="small"><b>This cannot be undone.</b> Download the results first (Results tab → CSV) if you may need them.</p>
       <label class="f">Type <b>${esc(s.code)}</b> to confirm<input id="del_confirm" autocomplete="off" autocapitalize="characters" style="text-transform:uppercase"></label>
       <div class="row"><button class="btn danger" ${G.busy ? "disabled" : ""}>Delete permanently</button><button type="button" class="btn ghost" data-g="editClose">Cancel</button></div></form>`;
