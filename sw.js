@@ -2,7 +2,7 @@
    Opening the app: when online, the newest version is fetched first (a slow or absent connection
    falls back to the copy saved on the phone within a few seconds), so updates appear at once.
    Results are never handled here: they are saved on the phone and sent by the app. */
-const CACHE = "step2read-v1.6.1";
+const CACHE = "step2read-v1.7.0";
 const CORE = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (e) => {

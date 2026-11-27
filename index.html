@@ -389,7 +389,7 @@ S = load();
 const SYNC_URL = "https://yfinjbgozqmtmlensjxe.supabase.co/rest/v1/rpc/s2r_sync"; // Step2Read results database (Supabase)
 const SYNC_PUBLIC_KEY = SB_KEY; // results are accepted only from a signed-in, active account
 const SYNC_KEY = "s2r-pilot-2026";
-const APP_VERSION = "1.6.1";
+const APP_VERSION = "1.7";
 const Sync = (() => {
   const META = "step2read.sync." + (Auth.uid() || "none");
   let meta = {}; try { meta = JSON.parse(localStorage.getItem(META) || "{}"); } catch (e) {}
@@ -413,7 +413,7 @@ const Sync = (() => {
       facilitator: (Auth.profile() || {}).full_name || st.name || "", school: st.school || "", schoolCode: (Auth.profile() || {}).school_code || "", grade: "", minutes: st.minutes || "", days: st.days || "", phone: st.phone || "",
       planStart: d.plan ? d.plan.start || "" : "",
       test: isProg(Auth.profile()),
-      learners: d.learners.map((l) => ({ id: l.id, name: l.name || "", grade: l.grade || "", assessments: (l.assessments || []).map((a) => ({
+      learners: d.learners.map((l) => ({ id: l.id, name: l.name || "", grade: l.grade || "", pending: l.pending ? { date: l.pending.date, reason: l.pending.reason } : null, assessments: (l.assessments || []).map((a) => ({
         id: a.id, date: a.date, form: a.form, grade: a.grade, level: a.level, startUnit: a.startUnit, wcpm: a.wcpm || 0,
         acc: a.acc ?? "", comp: a.comp ?? "", gaps: a.gaps || [], diagnosed: !!a.diagnosed, source: a.source || "school" })) })),
       weeks: CYCLE, homeLog: d.homeLog || [] };
@@ -673,7 +673,9 @@ function finishAssessment(run) {
     const t = targetWcpm(run.grade); if (wcpm < t) focus.push(`Fluency gap: ${Math.round(t - wcpm)} words a minute to the ${GRADE_LABEL[run.grade]} target of ${t}`); }
   if (level === "L7") { startUnit = 18; focus.push("Word study: syllables, prefixes and suffixes"); }
   const ln = S.learners.find((x) => x.id === run.learnerId);
-  const rec = { id: uid(), date: today(), form: run.form, grade: run.grade, level, startUnit, gaps, missedTricky, wcpm: Math.round(wcpm || 0),
+  delete ln.pending;
+  if (run.replaces) ln.assessments = (ln.assessments || []).filter((x) => x.id !== run.replaces);
+  const rec = { id: uid(), date: run.origDate || today(), form: run.form, grade: run.grade, level, startUnit, gaps, missedTricky, wcpm: Math.round(wcpm || 0),
     acc: passage ? Math.round(passage.acc * 100) : null, comp, focus, diagnosed: !!run.diagDone, raw: run.r };
   if (isParent() && S.link) { rec.source = "home"; rec.status = "pending"; rec.sent = false; ln.homeChecks = ln.homeChecks || []; ln.homeChecks.push(rec); save(); return rec; }
   ln.assessments = ln.assessments || []; ln.assessments.push(rec); save();
@@ -822,6 +824,8 @@ function readGradeGroups() {
 function nextAction() {
   const n = S.learners.length; const assessed = S.learners.filter(latest).length;
   if (!n) return { t: "Add your learners", b: "Add the names of the children you teach.", a: "editSetup", l: "Add learners" };
+  const unf = S.learners.filter((l) => l.pending);
+  if (unf.length) return { t: unf.length === 1 ? `Finish ${esc(unf[0].name)}'s check` : `Finish ${unf.length} checks`, b: `${unf.map((l) => esc(l.name)).join(", ")} stopped part-way through the check and ${unf.length === 1 ? "isn't" : "aren't"} in a group yet. It picks up where you stopped.`, a: "resumeFirst", l: "Finish the check" };
   if (assessed < n) return { t: isParent() ? `Check ${esc(S.learners[0].name)}'s reading` : `${n - assessed} learner${n - assessed > 1 ? "s" : ""} still to check`,
     b: isParent() ? "About 10 minutes. Sit together with the phone between you." : "Each check takes 2–3 minutes, plus a few minutes of diagnostic.", a: "pickAssess", l: "Start a check" };
   if (!S.plan) return { t: `Make the ${CYCLE}-week plan`, b: "Everyone is checked. Step2Read will group, sequence and pace the work.", a: "makePlan", l: "Make the plan" };
@@ -874,8 +878,8 @@ function vLearners() {
   if (isParent()) { const c = S.learners[0]; return c ? vLearner(c.id) : vHome(); }
   return `<div class="stack"><div class="row between"><h1>Learners</h1><div class="row" style="gap:6px"><button class="btn" data-go="links">Home links</button><button class="btn" data-act="goPaste">Paste a parent's code</button><button class="btn ghost" data-act="editSetup">Edit class</button></div></div>
   <div class="card"><div class="list">${S.learners.map((ln) => { const a = latest(ln);
-    return `<div class="li"><div style="min-width:0"><div class="name">${esc(ln.name)} ${homeBadge(ln)}</div><div class="small muted">${esc(GRADE_LABEL[ln.grade] || "Grade not set")} · ${a ? `Checked ${fmtDate(a.date)}${a.wcpm ? ` · ${a.wcpm} words/min` : ""}` : "Not checked yet"}</div></div>
-      <div class="row" style="gap:6px">${a ? `<button class="btn ghost" data-act="openLearner" data-id="${ln.id}">${lv(a.level)}</button>` : `<button class="btn" data-act="assess" data-id="${ln.id}">Check</button>`}</div></div>`; }).join("") || '<p class="muted">No learners yet.</p>'}</div></div></div>`;
+    return `<div class="li"><div style="min-width:0"><div class="name">${esc(ln.name)} ${checkBadge(ln)} ${homeBadge(ln)}</div><div class="small muted">${esc(GRADE_LABEL[ln.grade] || "Grade not set")} · ${a ? `Checked ${fmtDate(a.date)}${a.wcpm ? ` · ${a.wcpm} words/min` : ""}` : "Not checked yet"}</div></div>
+      <div class="row" style="gap:6px">${ln.pending ? `<button class="btn primary" data-act="resumeCheck" data-id="${ln.id}">Finish check</button>` : a ? `<button class="btn ghost" data-act="openLearner" data-id="${ln.id}">${lv(a.level)}</button>` : `<button class="btn" data-act="assess" data-id="${ln.id}">Check</button>`}</div></div>`; }).join("") || '<p class="muted">No learners yet.</p>'}</div></div></div>`;
 }
 function vLearner(id) {
   id = id || S.ui.id; const ln = S.learners.find((x) => x.id === id); if (!ln) return vLearners(); const a = latest(ln); const g = lgrade(ln);
@@ -889,7 +893,8 @@ function vLearner(id) {
     <div><div class="small muted">Reading speed</div><b>${a.wcpm ? `${a.wcpm} words a minute` : "Not yet reading connected text"}</b>${a.acc ? ` <span class="small muted">· ${a.acc}% accurate</span>` : ""}</div></div>
     ${a.wcpm && (g || a.grade) ? `<p class="small muted">${GRADE_LABEL[g || a.grade]} benchmark: ${targetWcpm(g || a.grade)} words a minute${FLUENT_MOE[g || a.grade] ? ` (MoE "fluent": ${FLUENT_MOE[g || a.grade]}+)` : ""}.</p>` : ""}
     ${a.focus.length ? `<ul class="small" style="margin:0;padding-left:1.2em">${a.focus.map((f) => `<li>${esc(f)}</li>`).join("")}</ul>` : ""}
-    ${a.diagnosed ? "" : `<p class="small banner">Screener only. Run the full check to find the exact gaps.</p>`}</div>` : `<div class="card"><p class="muted">Not checked yet.</p></div>`}
+    ${a.diagnosed ? "" : canDoPart2(a) ? `<div class="banner stack-s"><span class="small"><b>Part 2 not done.</b> ${esc(part2Need({ level: a.level, grade: a.grade, r: a.raw || {} }).why || "Part 2 shows exactly what to work on.")} ${esc(ln.name)} stays in the current group meanwhile.</span><div><button class="btn primary mat" data-act="part2For" data-id="${ln.id}">Do part 2 now</button></div></div>` : `<p class="small banner">Part 1 only. Run a full check to find the exact gaps.</p>`}</div>` : ln.pending ? "" : `<div class="card"><p class="muted">Not checked yet.</p></div>`}
+  ${ln.pending ? `<div class="banner stack-s"><span class="small"><b>Check not finished</b> (stopped ${fmtDate(ln.pending.date)}). ${esc(ln.name)} isn't in a group until it's done. It picks up where you stopped.</span><div><button class="btn primary mat" data-act="resumeCheck" data-id="${ln.id}">Finish the check</button></div></div>` : ""}
   <div class="row">${isParent() && S.link ? `<button class="btn primary" data-act="homeCheck">Home check</button>` : `<button class="btn primary" data-act="assess" data-id="${ln.id}">${a ? "Check again" : "Start the check"}</button>`}</div>
   ${!isParent() && a && S.plan ? homeCard(ln) : ""}
   ${ln.assessments && ln.assessments.length > 1 ? `<div class="card"><h3>History</h3><div class="list">${ln.assessments.slice().reverse().map((x) => `<div class="li"><span>${fmtDate(x.date)} · Form ${x.form}${x.wcpm ? ` · ${x.wcpm} w/min` : ""}</span>${lv(x.level)}</div>`).join("")}</div></div>` : ""}
@@ -897,9 +902,62 @@ function vLearner(id) {
 }
 
 // -- assessment runner
+const isPP = (g) => g === "PP1" || g === "PP2";
+// Part 2 (the diagnostic) is required when it changes what the child is taught, or when Part 1 was not clear-cut.
+function part2Need(R) {
+  const lvl = R.level, g = R.grade, li = LEVELS.indexOf(lvl);
+  if (isPP(g) && lvl === "L0") return { req: true, why: "Letter sounds are new for most preschoolers, so the listening and sound games are the real check." };
+  if (isPP(g) && li > 2) return { req: true, why: `It is unusual for a ${GRADE_LABEL[g]} child to read at this level, so Part 2 confirms it.` };
+  if (lvl === "L1") return { req: true, why: "Part 2 finds which letter sounds are missing. That decides where lessons start." };
+  if (lvl === "L3" || lvl === "L4") return { req: true, why: "Part 2 finds which spelling patterns to start from. That decides where lessons start." };
+  if (lvl === "L6") return { req: true, why: "Part 2 checks understanding before a child leaves the support groups for independent reading." };
+  const near = borderline(R); if (near) return { req: true, why: near };
+  return { req: false, why: "" };
+}
+function borderline(R) {   // a Part 1 score right on a dividing line between two levels
+  const r = R.r || {}; const lvl = R.level;
+  if (r.A && !r.A.early) { const c = 10 - r.A.wrong.length; if ([3, 4, 7, 8].includes(c)) return "The letter score was right on a dividing line, so Part 2 makes sure the placement is right."; }
+  if (r.B) { const c = 10 - r.B.wrong.length; if (c === 7 || c === 8) return "The word score was right on a dividing line, so Part 2 makes sure the placement is right."; }
+  if (r.C) { const w = r.C.wrong.length; if (w === 3 || w === 4) return "The paragraph score was right on a dividing line, so Part 2 makes sure the placement is right."; }
+  for (const k of ["D", "E"]) { const x = r[k]; if (!x) continue;
+    if (x.stopped && (x.secs || 60) < 20) return "The timed reading stopped very early, so the reading speed may not be reliable. Part 2 makes sure the placement is right.";
+    if (x.acc >= 0.87 && x.acc < 0.93) return "Reading accuracy was right on a dividing line, so Part 2 makes sure the placement is right.";
+    if ((lvl === "L5" || lvl === "L6") && Math.abs((x.wcpm || 0) - (k === "E" ? 90 : targetWcpm(R.grade))) <= 5) return "Reading speed was within 5 words a minute of the benchmark, so Part 2 makes sure the placement is right."; }
+  return "";
+}
+// Part 1 is done: go straight into Part 2 when it is required, otherwise show the result and recommend it.
+function afterPart1(R) {
+  R.phase = "placed"; stopTimer(); R.need = part2Need(R);
+  if (R.need.req) { R.phase = "diag"; R.step = diagSteps(R.level)[0]; R.part2Intro = true; newStep(); go("assess"); return; }
+  go("result", { placed: true });
+}
+const part2Name = (R) => (isPP(R.grade) && R.level === "L0" ? "Listening and sound games" : "Part 2");
+const PART2_MINS = { L0: 6, L1: 5, L2: 4, L3: 5, L4: 5, L5: 1, L6: 1, L7: 3 };
+// Resume Part 2 where it stopped (or start Part 2 again if the answers are more than 3 days old).
+function resumeRun(id) {
+  const ln = S.learners.find((x) => x.id === id); const p = ln && ln.pending; if (!p) return startRun(id);
+  const old = (Date.now() - new Date(p.date + "T12:00:00").getTime()) / 864e5 > 3; const q = p.run;
+  S.run = { learnerId: id, form: q.form, grade: q.grade, r: q.r || {}, d: old ? {} : q.d || {}, level: q.level, step: old ? diagSteps(q.level)[0] : q.step,
+    phase: "diag", need: q.need || part2Need(q), replaces: q.replaces || null, origDate: q.origDate || null, resumed: true, restarted: old, part2Intro: true, cur: null };
+  newStep(); go("assess");
+}
+// Part 2 for an earlier check that was saved without it: completes that same check (no second check is added).
+function canDoPart2(a) { return !!a && !a.diagnosed && a.source !== "home" && !!a.raw && (!["L5", "L6"].includes(a.level) || !!a.raw.D); }
+function part2For(id) {
+  const ln = S.learners.find((x) => x.id === id); const a = latest(ln); if (!canDoPart2(a)) return;
+  S.run = { learnerId: id, form: a.form, grade: a.grade || lgrade(ln), r: JSON.parse(JSON.stringify(a.raw)), d: {}, level: a.level, step: diagSteps(a.level)[0], phase: "diag",
+    replaces: a.id, origDate: a.date, cur: null };
+  S.run.need = part2Need(S.run); S.run.part2Intro = true; newStep(); go("assess");
+}
+function checkBadge(ln) {
+  if (ln.pending) return `<span class="hb warn">Check not finished</span>`;
+  const a = latest(ln); if (a && canDoPart2(a) && part2Need({ level: a.level, grade: a.grade, r: a.raw || {} }).req) return `<span class="hb">Part 2 not done</span>`;
+  return "";
+}
 function startRun(id) {
   const ln = S.learners.find((x) => x.id === id); const n = (ln.assessments || []).length;
   if (!lgrade(ln)) { go("learner", { id, flash: `Choose ${ln.name}'s grade first. It decides which reading check ${ln.name} gets.` }); return; }
+  if (ln.pending) { resumeRun(id); return; }   // a check stopped part-way: finish it, don't start another
   const form = n === 0 ? "A" : n === 1 ? "B" : n % 2 === 0 ? "C" : "B";
   S.run = { learnerId: id, form, grade: lgrade(ln), r: {}, d: {}, step: "A", phase: "screener", level: null, cur: null };
   newStep(); go("assess");
@@ -981,9 +1039,34 @@ function vAssess() {
     body = `<p class="small muted">From “${esc(src.title)}”.</p><div class="card">${qs.map((q, qi) => qRow(q, qi, c.q[qi])).join("")}</div>
       <div class="row" style="justify-content:flex-end"><button class="btn primary" data-act="doneStep" ${c.q.filter((x) => x !== undefined).length < qs.length ? "disabled" : ""}>Done</button></div>`;
   }
+  const noneAsk = c.askNone ? `<div class="banner stack-s" role="alert"><b>No mistakes tapped.</b><span class="small">Did ${esc(ln.name)} get every ${["grid", "tgrid"].includes(sp.kind) ? "item" : "word"} right? If not, go back and tap each one ${esc(ln.name)} got wrong or skipped.</span>
+      <div class="row"><button class="btn primary" data-act="noneNo">Go back and tap mistakes</button><button class="btn" data-act="noneYes">Yes, all correct</button></div></div>` : "";
+  const early = R.phase === "screener" && R.step === "A" && isPP(R.grade) && [0, 1, 2].every((i) => c.wrong.includes(i))
+    ? `<div class="banner info stack-s"><b>The first 3 letters were missed.</b><span class="small">That's normal for a preschooler who hasn't learnt letter sounds yet. Stop the letter task here, praise ${esc(ln.name)}, and go to the listening and sound games.</span>
+      <div><button class="btn primary" data-act="earlyStop">Stop letters, go to the games</button></div></div>` : "";
+  const intro = R.phase === "diag" && R.part2Intro && R.need ? `<div class="banner info stack-s"><b>${R.resumed ? (R.restarted ? "Starting part 2 again: the earlier answers were more than 3 days old." : "Picking up where you stopped.") : `Part 1 done: ${R.level} · ${LEVEL_NAMES[R.level]}.`} Now ${part2Name(R).toLowerCase()} (about ${PART2_MINS[R.level]} minute${PART2_MINS[R.level] === 1 ? "" : "s"}).</b><span class="small">${esc(R.need.why || "")}</span></div>`
+    : R.phase === "diag" && R.resumed && idx === seq.indexOf(R.step) && !R.d[R.step] && R.restarted ? `<div class="banner info small">Part 2 is starting again: the earlier answers were more than 3 days old.</div>` : "";
+  const stopSheet = S.ui.stopAsk ? `<div class="card stack-s" style="border-color:var(--margin)" role="alertdialog"><h3>Stop before ${part2Name(R) === "Part 2" ? "Part 2 is" : "the games are"} finished?</h3>
+      <p class="small">${part2Name(R)} decides where ${esc(ln.name)} starts. If you stop now, ${esc(ln.name)} won't be placed in a group until it's finished. The answers so far are saved, and it picks up where you stopped.</p>
+      <div><button class="btn primary" data-act="stopNo">Keep going</button></div>
+      <p class="small muted" style="margin-bottom:0">Stop only if you must. Why are you stopping?</p>
+      <div class="row">${[["tired", "Child is tired"], ["upset", "Child is upset"], ["unwell", "Child is unwell"], ["time", "Out of time"]].map(([k, t]) => `<button class="btn ghost mat" data-act="stopWhy" data-v="${k}">${t}</button>`).join("")}</div></div>` : "";
+  const sounds = sayList(R.step, sp);
+  const sayBox = sounds.length ? `<details class="card flat"><summary class="small"><b>How to say these sounds</b></summary><ul class="small" style="margin:.4rem 0 0;padding-left:1.2em">${sounds.map((x) => `<li><b>${esc(x)}</b>: ${esc(DATA.say[x])}</li>`).join("")}</ul>
+      <p class="small muted" style="margin:.4rem 0 0">Say the pure sound, not the letter name: "mmm", not "em" or "muh".</p></details>` : "";
+  const label = R.phase === "screener" ? `Check · part 1 of 2` : part2Name(R) === "Part 2" ? "Check · part 2 of 2" : "Check · listening and sound games";
   return `<div class="stack">
-    <div class="row between"><div><p class="label">${R.phase === "screener" ? "Screener" : "Diagnostic"} · Form ${R.form} · ${esc(ln.name)}</p><h2>${esc(sp.title)}</h2></div><button class="btn ghost" data-act="quitRun">Stop</button></div>
-    ${bar}<p class="script">${esc(sp.script)}</p>${body}</div>`;
+    <div class="row between"><div><p class="label">${label} · ${esc(ln.name)}</p><h2>${esc(sp.title)}</h2></div><button class="btn ghost" data-act="quitRun">Stop</button></div>
+    ${stopSheet}${intro}${bar}<p class="script">${esc(sp.script)}</p>${sayBox}${early}${noneAsk}${body}</div>`;
+}
+// The sounds the adult says or listens for in this task, with the "how to say it" tip for each.
+function sayList(step, sp) {
+  let xs = [];
+  if (["A", "inventory", "grid"].includes(step)) xs = sp.items.map((x) => String(x).toLowerCase());
+  else if (step === "first") xs = sp.items.map((w) => w[0]);
+  else if (step === "blendA" || step === "blendB") xs = sp.items.flatMap((w) => w.split("-"));
+  else if (step === "segment") xs = sp.items.flatMap((w) => w.split(""));
+  return [...new Set(xs)].filter((x) => DATA.say[x]);
 }
 function timerRow(c) {
   const left = c.started ? Math.max(0, 60 - Math.floor(c.secs)) : 60;
@@ -1005,10 +1088,10 @@ function completeStep() {
       const scoredIdx = toks.map((w, i) => (names.has(w.replace(/'s$/, "")) ? -1 : i)).filter((i) => i >= 0 && i <= c.last);
       const errs = c.wrong.filter((i) => i <= c.last); const attempted = scoredIdx.length; const correct = attempted - errs.length;
       const secs = c.stopped ? Math.max(5, c.stopSecs) : 60;
-      R.r[R.step] = { attempted, correct, acc: attempted ? correct / attempted : 0, wcpm: Math.round(correct * 60 / secs), q: c.q.slice(), errWords: errs.map((i) => toks[i]) };
+      R.r[R.step] = { attempted, correct, acc: attempted ? correct / attempted : 0, wcpm: Math.round(correct * 60 / secs), q: c.q.slice(), errWords: errs.map((i) => toks[i]), secs: Math.round(secs), stopped: !!c.stopped };
     }
     const lvl = place(R); const nxt = nextScreenerStep(R);
-    if (lvl || !nxt) { R.level = lvl || "L5"; R.phase = "placed"; stopTimer(); go("result", { placed: true }); return; }
+    if (lvl || !nxt) { R.level = lvl || "L5"; afterPart1(R); return; }
     R.step = nxt; newStep(); render(); return;
   }
   // diagnostic
@@ -1019,7 +1102,7 @@ function completeStep() {
     rec.correct = att - errs; rec.perMin = (att - errs) * 60 / secs; }
   if (sp.kind === "yn" || sp.kind === "listen" || sp.kind === "moreQ") { rec.correct = c.q.filter(Boolean).length; rec.total = c.q.length; rec.q = c.q.slice(); }
   if (sp.kind === "passage") rec.correct = wordsOf(sp.text).length - c.wrong.length;
-  R.d[R.step] = rec;
+  R.d[R.step] = rec; R.part2Intro = false;
   if (R.step === "moreQ") { const pk = gradeNum(R.grade) >= 3 && R.r.E ? "E" : "D"; R.r[pk].q = (R.r[pk].q || []).concat(c.q); }
   const seq = diagSteps(R.level); const i = seq.indexOf(R.step);
   if (i < seq.length - 1) { R.step = seq[i + 1]; newStep(); render(); return; }
@@ -1029,10 +1112,10 @@ function vResult() {
   const R = S.run; const ln = S.learners.find((x) => x.id === R.learnerId);
   if (S.ui.placed) {
     const steps = diagSteps(R.level); const mins = { L0: 6, L1: 5, L2: 4, L3: 5, L4: 5, L5: 1, L6: 1, L7: 3 }[R.level];
-    return `<div class="stack"><p class="label">Screener result · ${esc(ln.name)}</p><h1>Placed at ${R.level}</h1><div>${lv(R.level)}</div>
+    return `<div class="stack"><p class="label">Part 1 result · ${esc(ln.name)}</p><h1>Placed at ${R.level}</h1><div>${lv(R.level)}</div>
       <div class="card stack-s"><p>${esc(levelBlurb(R.level))}</p>${R.r.D ? `<p class="small muted">Story: ${R.r.D.wcpm} words a minute, ${Math.round(R.r.D.acc * 100)}% accurate.</p>` : ""}</div>
-      <div class="card stack-s"><h3>Find the exact gaps (about ${mins} minute${mins > 1 ? "s" : ""})</h3><p class="muted small">${steps.length} short task${steps.length > 1 ? "s" : ""} for this level. The plan is much more precise with them.</p>
-      <div class="row"><button class="btn primary" data-act="startDiag">Continue to the diagnostic</button><button class="btn" data-act="saveScreener">Save screener only</button></div></div></div>`;
+      <div class="card stack-s"><h3>Part 2 adds teaching notes (about ${mins} minute${mins > 1 ? "s" : ""})</h3><p class="muted small">${steps.length} short task${steps.length > 1 ? "s" : ""} that show exactly what to work on with ${esc(ln.name)}. Recommended while ${esc(ln.name)} is still with you.</p>
+      <div class="row"><button class="btn primary" data-act="startDiag">Continue to part 2</button><button class="btn ghost mat" data-act="saveScreener">Save without part 2</button></div></div></div>`;
   }
   const homeRec = isParent() && S.link; const a = homeRec ? ln.homeChecks[ln.homeChecks.length - 1] : latest(ln);
   return `<div class="stack"><p class="label">${homeRec ? "Home check" : "Check"} complete · ${esc(ln.name)}</p>
@@ -1077,6 +1160,7 @@ function vPlan() {
     ${isParent() ? `<p class="small muted">Goal by the end of the programme: ${g.fluency ? `reach ${g.wcpm10} words a minute` : `secure Unit ${g.sec10 ?? g.start}`}. Every extra 5 minutes a day helps your child move up the ladder faster.</p>`
       : `<p class="small muted">Lessons follow this group's reading level, whatever grade each child is in.${g.fluency ? ` Group reading speed now: ${g.wcpmNow} words a minute; next benchmark: ${bandTarget(g.wcpmNow || 0)}.` : ""}${g.compFocus ? " Comprehension is a focus for most of this group." : ""}</p>`}
   </div>`).join("")}
+  ${!isParent() && S.learners.some((l) => l.pending && !latest(l)) ? `<div class="banner stack-s"><b>Not yet placed</b><span class="small">${S.learners.filter((l) => l.pending && !latest(l)).map((l) => esc(l.name)).join(", ")}: their check stopped part-way. Finish it, then tap Update plan to add them to a group.</span><div><button class="btn primary mat" data-act="resumeFirst">Finish the check</button></div></div>` : ""}
   ${P.atLevel.length ? `<div class="card"><h3>Reading at their grade's benchmark</h3><p class="small">${P.atLevel.map(name).join(", ")}: independent reading during the block.</p></div>` : ""}
 </div>`;
 }
@@ -1462,7 +1546,7 @@ function drawReader() {
     ${set.words ? `<p class="small" style="font-family:var(--ui)">Words to teach: ${set.words.map(esc).join(", ")}</p>` : ""}
     ${set.qs ? `<ol class="small" style="font-family:var(--ui)">${set.qs.map((q) => `<li>${esc(q)}</li>`).join("")}</ol>` : ""}</div>`; }
   R.innerHTML = `<div class="bar"><b>${esc(set.label || set.title || "")}</b><div class="row" style="gap:6px">
-      ${"speechSynthesis" in window && set.t !== "sound" ? `<button class="btn" data-act="speak">Hear it</button>` : ""}<button class="btn" data-act="closeReader">Close</button></div></div>
+<button class="btn" data-act="closeReader">Close</button></div></div>
     <div class="sheet">${inner}</div>
     <div class="foot"><button class="btn" data-act="prevCard" ${i === 0 ? "disabled" : ""}>← Back</button><span class="small muted" style="font-variant-numeric:tabular-nums">${count > 1 ? `${i + 1} / ${count}` : ""}</span>
       <button class="btn primary" data-act="nextCard" ${i >= count - 1 ? "disabled" : ""}>Next →</button></div>`;
@@ -2061,7 +2145,8 @@ const Gate = (() => {
     const canManage = !mine && (p.role === "super_admin" || (p.role === "linchpin_admin" && x.role !== "super_admin") || (p.role === "school_admin" && x.role === "facilitator" && x.school_code === p.school_code));
     const st = { active: `<span class="hb ok">Active</span>`, invited: `<span class="hb warn">Invited</span>`, disabled: `<span class="hb">Switched off</span>` }[x.status];
     const where = x.school_code || "All schools";
-    const act = x.role === "facilitator" ? (x.last_sync ? `${x.children} children · last sync ${fmt(x.last_sync)}` : "No results synced yet") : "";
+    const unf = (D.allLearners || []).filter((l) => l.unfinished && String(l.class_id || "").startsWith(x.user_id + ":")).length;
+    const act = x.role === "facilitator" ? (x.last_sync ? `${x.children} children · last sync ${fmt(x.last_sync)}${unf ? ` · <b>${unf} check${unf === 1 ? "" : "s"} not finished</b>` : ""}` : "No results synced yet") : "";
     let edit = "";
     if (G.edit === x.user_id && sup) edit = `<form class="stack-s editbox" id="g_edit" data-id="${x.user_id}" novalidate>
       <div class="grid2"><label class="f">Access level<select id="e_role">${roleOpts(p, x.role)}</select></label><label class="f" id="e_schoolbox" ${["super_admin", "linchpin_admin"].includes(x.role) ? "hidden" : ""}>School<select id="e_school">${schoolOpts(D, x.school_code)}</select></label></div>
@@ -2269,14 +2354,26 @@ document.addEventListener("click", async (e) => {
     goSession: () => go("session"),
     openLearner: () => go("learner", { id: el.dataset.id }),
     assess: () => startRun(el.dataset.id),
-    quitRun: () => { stopTimer(); S.run = null; go("home"); },
+    quitRun: () => { if (R && R.phase === "diag") { S.ui.stopAsk = true; render(); window.scrollTo(0, 0); return; } stopTimer(); S.run = null; go("home"); },
+    stopNo: () => { S.ui.stopAsk = false; render(); },
+    stopWhy: () => { const ln = S.learners.find((x) => x.id === R.learnerId); stopTimer();
+      ln.pending = { date: today(), reason: el.dataset.v, run: { form: R.form, grade: R.grade, r: R.r, d: R.d, level: R.level, step: R.step, need: R.need, replaces: R.replaces || null, origDate: R.origDate || null } };
+      S.run = null; S.ui.stopAsk = false; save(); go("home", { flashTop: `${ln.name}'s check is saved part-way. Finish it soon: ${ln.name} isn't placed in a group until it's done.` }); },
+    resumeFirst: () => { const ln = S.learners.find((l) => l.pending); if (ln) resumeRun(ln.id); },
+    resumeCheck: () => resumeRun(el.dataset.id),
+    part2For: () => part2For(el.dataset.id),
+    earlyStop: () => { R.r.A = { wrong: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], early: true }; R.level = "L0"; afterPart1(R); },
+    noneYes: () => { R.cur.noneOk = true; R.cur.askNone = false; completeStep(); },
+    noneNo: () => { R.cur.askNone = false; render(); },
     tile: () => { const i = +el.dataset.i; const w = R.cur.wrong; const k = w.indexOf(i); k >= 0 ? w.splice(k, 1) : w.push(i); render(); },
     tok: () => { const i = +el.dataset.i; const w = R.cur.wrong; const k = w.indexOf(i); k >= 0 ? w.splice(k, 1) : w.push(i); render(); },
     lastTile: () => { R.cur.last = +el.dataset.i; render(); }, lastTok: () => { R.cur.last = +el.dataset.i; render(); },
     startTimed: () => startTimer(),
     stopTimed: () => { R.cur.stopSecs = (Date.now() - R.cur.t0) / 1000; R.cur.stopped = true; stopTimer(); render(); },
     ans: () => { R.cur.q[+el.dataset.i] = el.dataset.v === "1"; render(); },
-    doneStep: () => completeStep(),
+    doneStep: () => { const sp = stepSpec(R.step); const c = R.cur;
+      if (["grid", "tgrid", "passage", "timed"].includes(sp.kind) && !c.wrong.length && !c.noneOk) { c.askNone = true; render(); return; }
+      completeStep(); },
     startDiag: () => { R.phase = "diag"; R.step = diagSteps(R.level)[0]; newStep(); go("assess"); },
     saveScreener: () => { finishAssessment(R); go("result", { placed: false }); },
     afterResult: () => { if (isParent() && S.link) { go("home"); return; } if (isParent()) { if (!S.plan) makePlan(); go("plan"); return; } const n = S.learners.find((l) => !latest(l)); if (n) startRun(n.id); else { makePlan(); go("plan"); } },
