@@ -331,7 +331,7 @@ const Auth = (() => {
     setSession, keep, token, api, rpc, get, fn, refreshProfile, signOut,
   };
 })();
-const NOT_REAL = ["DEMO", "TEST"];   // school codes that are never programme data (see s2r_sync: super admin entries go to TEST)
+const NOT_REAL = ["DEMO", "TEST", "PRACTICE"];   // never programme data: the demo class, super admin entries (TEST) and onboarding practice classes (PRACTICE)
 const isPhoneOnly = (e) => /@phone\.step2read\.invalid$/.test(String(e || ""));   // placeholder login address for people invited by WhatsApp (never emailed)
 const phoneLocal = (ph) => (ph ? "0" + String(ph).slice(3) : "");
 const isStaff = (p) => !!p && ["super_admin", "linchpin_admin", "school_admin"].includes(p.role);
@@ -388,7 +388,7 @@ S = load();
 const SYNC_URL = "https://yfinjbgozqmtmlensjxe.supabase.co/rest/v1/rpc/s2r_sync"; // Step2Read results database (Supabase)
 const SYNC_PUBLIC_KEY = SB_KEY; // results are accepted only from a signed-in, active account
 const SYNC_KEY = "s2r-pilot-2026";
-const APP_VERSION = "1.5.3";
+const APP_VERSION = "1.6";
 const Sync = (() => {
   const META = "step2read.sync." + (Auth.uid() || "none");
   let meta = {}; try { meta = JSON.parse(localStorage.getItem(META) || "{}"); } catch (e) {}
@@ -408,7 +408,7 @@ const Sync = (() => {
   function payload(id, d) {
     if (!d || !d.mode || d.example || !Array.isArray(d.learners) || !d.learners.length) return null;
     const st = d.setup || {};
-    return { app: APP_VERSION, key: SYNC_KEY, device: meta.device, store: id, mode: d.mode,
+    return { app: APP_VERSION, key: SYNC_KEY, device: meta.device, store: st.gen ? id + "." + st.gen : id, mode: d.mode,
       facilitator: (Auth.profile() || {}).full_name || st.name || "", school: st.school || "", schoolCode: (Auth.profile() || {}).school_code || "", grade: "", minutes: st.minutes || "", days: st.days || "", phone: st.phone || "",
       planStart: d.plan ? d.plan.start || "" : "",
       test: (Auth.profile() || {}).role === "super_admin",
@@ -424,7 +424,7 @@ const Sync = (() => {
     if (!navigator.onLine) { if (manual) { meta.err = "No internet right now. Results are safe on this phone and will send when you are back online."; keep(); paint(); } return; }
     let tk = await Auth.token();
     if (!tk) { meta.err = "Please sign in again to send results. Everything is safe on this phone."; keep(); paint(); return; }
-    busy = true; paint(); let ok = 0, fail = "";
+    busy = true; paint(); let ok = 0, fail = "", again = false;
     for (const [id, d] of stores()) {
       const p = payload(id, d); if (!p) continue; const k = meta.device + ":" + id; const g = sig(p);
       if (meta.sent[k] === g && !manual) continue;
@@ -432,11 +432,26 @@ const Sync = (() => {
         const send = () => fetch(SYNC_URL, { method: "POST", headers: { "Content-Type": "application/json", apikey: SYNC_PUBLIC_KEY, Authorization: "Bearer " + tk }, body: JSON.stringify({ payload: { ...p, sentAt: new Date().toISOString() } }) });
         let r = await send(); if (r.status === 401) { tk = await Auth.token(true); if (!tk) { fail = "Please sign in again to send results. Everything is safe on this phone."; break; } r = await send(); }
         const j = await r.json().catch(() => ({}));
-        if (r.ok && j.ok) { meta.sent[k] = g; ok++; } else fail = j.error || "The programme database did not accept the results.";
+        if (r.ok && j.ok) { meta.sent[k] = g; ok++; if (j.practice) { setAsidePractice(id, j.practiceBefore || "9999-12-31"); delete meta.sent[k]; again = true; } }
+        else fail = j.error || "The programme database did not accept the results.";
       } catch (e) { fail = "Could not reach the programme database. Will try again."; }
     }
     if (!fail) { meta.last = new Date().toISOString(); meta.err = ""; } else meta.err = fail;
     busy = false; keep(); paint();
+    if (again) soon();   // a class just started afresh: send its real learners (if any) as a new class
+  }
+  // The programme marked this class as practice (e.g. teacher onboarding). Keep the practice learners on this phone,
+  // apart and never sent again, and start a clean class with the same settings. Learners with a check on or after
+  // the cut-off day are real and stay in the class.
+  function setAsidePractice(id, before) {
+    const d = wsRead(id); if (!d) return;
+    const isReal = (l) => (l.assessments || []).some((a) => a.date >= before);
+    const real = (d.learners || []).filter(isReal), prac = (d.learners || []).filter((l) => !isReal(l));
+    try { localStorage.setItem("step2read.practice." + (Auth.uid() || "none") + "." + id + "." + Date.now().toString(36), JSON.stringify({ ...d, learners: prac, setAside: today() })); } catch (e) {}
+    const fresh = { ...d, learners: real, plan: null, homeLog: [], setup: { ...(d.setup || {}), gen: Date.now().toString(36), practiceNotice: prac.length || 0 } };
+    delete fresh.ui; delete fresh.run;
+    try { localStorage.setItem(dataKey(id), JSON.stringify(fresh)); } catch (e) {}
+    if (id === WS.cur) { S = load(); try { render(); } catch (e) {} }
   }
   function soon() { clearTimeout(timer); timer = setTimeout(() => run(false), 4000); paint(); }
   function state() {
@@ -829,6 +844,8 @@ function vHome() {
   const child = isParent() ? S.learners[0] : null; const a = child && latest(child);
   return `<div class="stack">
   ${S.example ? `<div class="banner small"><b>Example class.</b> These children and results are made up so you can explore. <button class="btn ghost" data-act="example" data-v="${S.example === "g1" ? "g2" : "g1"}">See the ${S.example === "g1" ? "Grade 2" : "Grade 1"} example</button> <button class="btn ghost" data-act="example" data-v="p">See a linked parent</button> <button class="btn ghost" data-act="resetAll">Start my own</button></div>` : ""}
+  ${!isParent() && s.practiceNotice ? `<div class="banner stack-s"><b>Practice data set aside</b><span class="small">The ${s.practiceNotice} learner${s.practiceNotice === 1 ? "" : "s"} you entered while training ${s.practiceNotice === 1 ? "is" : "are"} saved on this phone as practice and won't be counted. Your class settings are kept. Add your real learners to begin.</span>
+    <div class="row"><button class="btn primary" data-act="editSetup">Add my learners</button><button class="btn ghost" data-act="practiceOk">OK</button></div></div>` : ""}
   ${!isParent() && s.gradeCheck ? `<div class="banner stack-s"><b>Please check each learner's grade</b><span class="small">Step2Read now uses each learner's own grade to choose their reading check, so one class can hold several grades. Everyone has been set to ${esc(GRADE_LABEL[s.oldGrade] || "the old class grade")} for now. Lessons and groups still follow reading level, so nothing about today's plan changes.</span>
     <div class="row"><button class="btn primary" data-act="editSetup">Check grades</button><button class="btn ghost" data-act="gradesOk">They're all correct</button></div></div>` : ""}
   <div class="stack-s"><p class="label">${isParent() ? `Home plan · ${esc(GRADE_LABEL[lgrade(child)] || "")}` : `${esc(s.school || "My class")} · ${gradeMix()}`} · ${s.minutes} min × ${s.days} days</p>
@@ -1934,7 +1951,7 @@ const Gate = (() => {
     return `<div class="stack">
       <div class="row" style="justify-content:space-between;align-items:flex-end"><div class="stack-s"><p class="label">${ROLE_LABEL[p.role]} · ${scope}</p><h1>Programme portal</h1></div>
         <div class="row"><button class="btn mat" data-g="refresh" ${G.loading ? "disabled" : ""}>${G.loading ? "Refreshing…" : "Refresh"}</button><button class="btn mat primary" data-g="toApp">Open the reading app</button></div></div>
-      ${sup && D.hasDemo ? `<div class="${G.demo ? "banner" : "banner info"} row" style="justify-content:space-between"><span class="small">${G.demo ? "<b>Demo and test data.</b> Showing the demo class (DEMO) and classes from your super admin account (TEST). Real programme results are hidden." : "The demo class and anything you enter from this super admin account are kept as test data: never counted in programme results, and only you can see them."}</span><button class="btn mat ${G.demo ? "" : "maize"}" data-g="demo">${G.demo ? "Back to programme results" : "Show demo and test data"}</button></div>` : ""}
+      ${sup && D.hasDemo ? `<div class="${G.demo ? "banner" : "banner info"} row" style="justify-content:space-between"><span class="small">${G.demo ? "<b>Demo and test data.</b> Showing the demo class (DEMO), classes from your super admin account (TEST) and onboarding practice classes (PRACTICE). Real programme results are hidden." : "The demo class and anything you enter from this super admin account are kept as test data: never counted in programme results, and only you can see them."}</span><button class="btn mat ${G.demo ? "" : "maize"}" data-g="demo">${G.demo ? "Back to programme results" : "Show demo and test data"}</button></div>` : ""}
       <nav class="ptabs" aria-label="Portal sections">${tabs.map(([k, l]) => `<button data-g="tab" data-v="${k}" ${G.tab === k ? 'aria-current="page"' : ""}>${l}</button>`).join("")}</nav>
       ${note()}${body}
       ${D.at ? `<p class="small muted">Updated ${fmt(D.at)}. Each class shows its results as of its phone's last sync.</p>` : ""}</div>`;
@@ -2241,6 +2258,7 @@ document.addEventListener("click", async (e) => {
   const actions = {
     ggAdd: () => { $("#gglist").insertAdjacentHTML("beforeend", ggHTML({ grade: "", names: "" })); const t = [...document.querySelectorAll("#gglist .gg-grade")].pop(); if (t) t.focus(); },
     ggRemove: () => { const all = document.querySelectorAll("#gglist .gg"); const box = el.closest(".gg"); if (all.length > 1) box.remove(); else { box.querySelector(".gg-names").value = ""; box.querySelector(".gg-grade").value = ""; } },
+    practiceOk: () => { delete S.setup.practiceNotice; save(); render(); },
     gradesOk: () => { delete S.setup.gradeCheck; save(); render(); },
     mode: () => { S.ui.mode = el.dataset.v; S.setup = { minutes: el.dataset.v === "parent" ? 15 : 30, days: 5 }; S.learners = []; go("setup", { mode: el.dataset.v }); },
     example: () => { if (WS.admin) { openPortal({ g1: "ex-g1", g2: "ex-g2", p: "ex-p" }[el.dataset.v || "g2"]); return; } if (el.dataset.v === "p") loadParentExample(); else loadExample(el.dataset.v || "g2"); render(); window.scrollTo(0, 0); },
@@ -2333,7 +2351,7 @@ document.addEventListener("submit", (e) => {
   if (p) { const nm = v("f_child").trim() || "My child"; if (S.learners[0]) { S.learners[0].name = nm; S.learners[0].grade = v("f_grade"); } else S.learners = [{ id: uid(), name: nm, grade: v("f_grade"), assessments: [] }]; }
   else { const keep = Object.fromEntries(S.learners.map((l) => [l.name, l])); const seen = new Set(); const out = [];
     for (const g of groups) for (const n of g.names) { if (seen.has(n)) continue; seen.add(n); const ln = keep[n] || { id: uid(), name: n, assessments: [] }; ln.grade = g.grade; out.push(ln); }
-    S.learners = out; delete S.setup.gradeCheck; }
+    S.learners = out; delete S.setup.gradeCheck; if (out.length) delete S.setup.practiceNotice; }
   if (!Gate.weeks()) { S.setup.weeks = Math.max(2, Math.min(30, +v("f_weeks") || 10)); setCycle(S.setup.weeks); if (S.plan && S.learners.some(latest)) makePlan(); }
   save(); go("home");
 });
