@@ -359,7 +359,7 @@ const KEY = Auth.uid() ? "step2read.u." + Auth.uid() : "step2read.signedout";
 (function startFresh() { // the pilot starts clean: practice data from before accounts is removed when someone signs in on this phone
   if (!Auth.uid()) return;
   try { const drop = []; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i);
-      if (k === LEGACY_KEY || k.startsWith(LEGACY_KEY + ":") || k === "step2read.ws" || k === "step2read.sync" || k.startsWith(KEY + ":")) drop.push(k); } // KEY + ":…" = classes from the old example workspaces
+      if (k === LEGACY_KEY || k.startsWith(LEGACY_KEY + ":") || k === "step2read.sync") drop.push(k); } // data from before accounts only; simulation classes (KEY + ":…") are kept
     drop.forEach((k) => localStorage.removeItem(k)); } catch (e) {}
 })();
 
@@ -389,7 +389,7 @@ S = load();
 const SYNC_URL = "https://yfinjbgozqmtmlensjxe.supabase.co/rest/v1/rpc/s2r_sync"; // Step2Read results database (Supabase)
 const SYNC_PUBLIC_KEY = SB_KEY; // results are accepted only from a signed-in, active account
 const SYNC_KEY = "s2r-pilot-2026";
-const APP_VERSION = "1.7";
+const APP_VERSION = "1.7.1";
 const Sync = (() => {
   const META = "step2read.sync." + (Auth.uid() || "none");
   let meta = {}; try { meta = JSON.parse(localStorage.getItem(META) || "{}"); } catch (e) {}
@@ -403,7 +403,7 @@ const Sync = (() => {
   function stores() { // every class or child saved on this phone
     const out = [];
     try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i);
-      if (k === KEY || k.startsWith(KEY + ":")) { const id = k === KEY ? "main" : k.slice(KEY.length + 1); const d = wsRead(id); if (d) out.push([id, d]); } } } catch (e) {}
+      if (k === KEY) { const d = wsRead("main"); if (d) out.push(["main", d]); } } } catch (e) {}   // simulation classes (KEY + ":…") are never sent or recorded
     return out;
   }
   function payload(id, d) {
@@ -464,7 +464,9 @@ const Sync = (() => {
     if (n) return { cls: "wait", text: "Waiting to sync", long: "New results will send in a moment." };
     return { cls: "ok", text: "Synced", long: meta.last ? `All results sent to the programme. Last sync ${new Date(meta.last).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}.` : "Nothing to send yet." };
   }
-  function paint() { const b = document.getElementById("syncchip"); if (!b) return; const st = state();
+  function paint() { const b = document.getElementById("syncchip"); if (!b) return;
+    if (WS.cur !== "main") { b.hidden = false; b.className = "syncchip off"; b.textContent = "Simulation · not recorded"; b.title = "This is a simulation. Nothing here is sent or recorded."; return; }
+    const st = state();
     b.hidden = !S.mode || !!S.example; b.className = "syncchip " + st.cls; b.textContent = st.text; b.title = st.long;
     const c = document.getElementById("syncCard"); if (c) c.textContent = st.long; }
   window.addEventListener("online", () => run(false)); window.addEventListener("offline", paint);
@@ -730,10 +732,10 @@ function render() {
   if (Gate.takeover()) return;
   const chip = $("#modechip"); const role = S.example ? (S.example === "p" ? "Example parent" : "Example class") : isParent() ? "Parent" : "Teacher";
   chip.hidden = !S.mode && !WS.admin; chip.classList.toggle("admin", !!WS.admin);
-  chip.textContent = WS.admin ? (S.ui.screen === "admin" ? "Super admin" : `Admin · ${(PORTALS[WS.cur] || {}).short || role} ⇄`) : role;
+  chip.textContent = WS.admin ? (S.ui.screen === "admin" ? "Simulation" : `Simulating · ${(PORTALS[WS.cur] || {}).short || role} ⇄`) : role;
   const fn = { welcome: vWelcome, setup: vSetup, home: vHome, learners: vLearners, learner: vLearner, assess: vAssess, result: vResult, plan: vPlan, session: vSession, more: vMore, paste: vPaste, links: vLinks, admin: vAdmin }[S.ui.screen] || vHome;
   Sync.paint();
-  $("#app").innerHTML = (S.ui.flashTop ? `<div class="banner small" style="margin-bottom:14px">${esc(S.ui.flashTop)}</div>` : "") + fn().replace(/([.!?])”\./g, "$1”") + `<p class="foot-note">Step2Read · © Linchpin Education</p>`; renderTabs(); afterRender();
+  $("#app").innerHTML = (WS.admin && WS.cur !== "main" && S.ui.screen !== "admin" ? `<div class="banner info small" style="margin-bottom:14px"><b>Simulation:</b> nothing here is sent or recorded. <button class="btn ghost mat" data-act="adminConsole">Simulation page</button></div>` : "") + (S.ui.flashTop ? `<div class="banner small" style="margin-bottom:14px">${esc(S.ui.flashTop)}</div>` : "") + fn().replace(/([.!?])”\./g, "$1”") + `<p class="foot-note">Step2Read · © Linchpin Education</p>`; renderTabs(); afterRender();
 }
 function afterRender() { const f = document.querySelector("[data-autofocus]"); if (f) f.focus(); }
 
@@ -764,7 +766,7 @@ function vWelcome() {
   ${isProg(Auth.profile()) ? `<div class="stack-s"><p class="label">Demo (programme admins only)</p>
     <button class="btn ghost" style="justify-content:flex-start" data-act="example" data-v="g2">${esc(EXAMPLES.g2.label)} →</button></div>` : ""}
   <p class="muted small">Results are saved on this phone first, so everything works offline. When you are online they are sent securely to your programme.</p>
-  ${BUILD_MODE ? `<button class="btn ghost" style="justify-content:flex-start" data-act="adminOn">Super admin (build mode): open both portals →</button>` : ""}
+  ${simOK() ? `<button class="btn ghost" style="justify-content:flex-start" data-act="adminOn">Simulate a teacher or parent (not recorded) →</button>` : ""}
 </div>`;
 }
 
@@ -1570,7 +1572,7 @@ function vMore() {
   <div class="card stack-s"><h3>Restore</h3><p class="small muted">Paste a backup to replace what is on this phone.</p><textarea id="rs" style="min-height:80px;font-size:.75rem" placeholder="Paste backup text here"></textarea>
     <div class="row"><button class="btn" data-act="restore">Restore backup</button><span id="rsMsg" class="small muted"></span></div></div>
   ${isParent() ? `<div class="card stack-s"><h3>Link to the teacher</h3><p class="small muted">${S.link ? `Linked to ${esc(S.link.tn || "the teacher")}. Paste a new code when the teacher sends an update.` : "Got a code from your child's teacher? Paste it to link home practice to the class."}</p><div><button class="btn" data-act="goPaste">Paste a code</button></div></div>` : ""}
-  ${BUILD_MODE ? `<div class="card stack-s"><h3>Super admin</h3><p class="small muted">${WS.admin ? "You are in super admin mode. Switch portals from the console." : "Build mode: open the teacher and parent portals side by side on this phone."}</p><div class="row"><button class="btn" data-act="adminOn">Open the console</button>${WS.admin ? `<button class="btn ghost" data-act="adminOff">Leave super admin</button>` : ""}</div></div>` : ""}
+  ${simOK() ? `<div class="card stack-s"><h3>Simulate a user</h3><p class="small muted">${WS.admin ? "You are simulating. Switch between the teacher and parent views from the simulation page. Nothing here is recorded." : "Try Step2Read as any teacher or parent. Nothing you do in a simulation is sent or recorded."}</p><div class="row"><button class="btn" data-act="adminOn">Open the console</button>${WS.admin ? `<button class="btn ghost" data-act="adminOff">Leave the simulation</button>` : ""}</div></div>` : ""}
   <div class="card stack-s"><h3>Share a summary</h3><p class="small">${esc(shareText())}</p><p class="small muted">No names are included.</p>
     <div class="row"><a class="btn" href="https://wa.me/?text=${encodeURIComponent(shareText())}" target="_blank" rel="noopener">Share on WhatsApp</a><button class="btn" data-act="copySum">Copy summary</button></div></div>
   <div class="card stack-s"><h3>Settings</h3><p class="small">${isParent() ? "Home" : esc(S.setup.school || "Class")} · ${isParent() ? esc(GRADE_LABEL[lgrade(S.learners[0])] || "") : gradeMix()} · ${S.setup.minutes} minutes × ${S.setup.days} days</p>
@@ -1806,14 +1808,16 @@ function seedExampleLinks() {   // demo only: some families linked, with home ac
 // ------------------------------------------------------------------ super admin (build mode)
 // One phone, several portals. Each portal is a separate workspace with its own data, so switching never overwrites anything.
 // Access levels are listed in ACCESS so more can be added later (school leader, coach, programme admin).
-const BUILD_MODE = false;  // true shows the Super admin entry (testing only); keep false for the live app
+// Simulation: programme-level accounts can try the app as any teacher or parent. Each simulated class lives on this
+// phone only (its own workspace) and is never sent or recorded.
+function simOK() { return isProg(Auth.profile()); }
 const PORTALS = {
-  teacher: { label: "Teacher portal", short: "Teacher", role: "teacher", desc: "A class you set up yourself for testing." },
-  parent: { label: "Parent portal", short: "Parent", role: "parent", desc: "A parent's phone: link it to a child from the teacher portal, or set up a child on its own." },
+  teacher: { label: "Teacher", short: "Teacher", role: "teacher", desc: "Set up a class and use it exactly as a teacher would: checks, plans, lessons, home links." },
+  parent: { label: "Parent", short: "Parent", role: "parent", desc: "A parent's phone: link it to a child from the simulated teacher, or set up a child on its own." },
   "ex-g2": { label: "Example: Grade 2 class", short: "Example G2", role: "teacher", example: "g2", desc: "28 learners, 30 min × 5 days, families linked." },
   "ex-g1": { label: "Example: Grade 1 class", short: "Example G1", role: "teacher", example: "g1", desc: "30 learners, 40 min × 5 days, families linked." },
   "ex-p": { label: "Example: linked parent", short: "Example parent", role: "parent", example: "p", desc: "Gitau's mother, linked to the Grade 2 example class." },
-  main: { label: "Original data on this phone", short: "Original", role: null, desc: "Whatever was set up before super admin mode." },
+  main: { label: "Your own class", short: "Own class", role: null, desc: "Your account's own class (recorded as test data, never counted)." },
 };
 const ACCESS = [
   { name: "Super admin", now: true, what: "Opens every portal on this phone, switches between them, resets test data." },
@@ -1839,15 +1843,12 @@ function vAdmin() {
       <div class="row" style="gap:6px"><button class="btn ${has ? "primary" : ""}" data-act="openPortal" data-v="${id}">${has ? "Open" : P.example ? "Load" : "Set up"}</button>
       ${has ? `<button class="btn ghost" data-act="wsAskReset" data-v="${id}" aria-label="Reset ${P.label}">Reset</button>` : ""}</div></div>`; };
   return `<div class="stack">
-  <div class="stack-s"><p class="label">Build mode · this phone only</p><h1>Super admin</h1>
-    <p class="muted">Open any portal. Each keeps its own data, so you can switch back and forth without losing anything. Tap the label at the top right to come back here.</p></div>
-  <div class="card stack-s"><h3>Your portals</h3><div class="list">${["teacher", "parent"].map(row).join("")}</div>
-    <p class="small muted">To test the school–home link on one phone: in the teacher portal open a learner and tap <b>Test: open as this child's parent</b>. In the parent portal, tap <b>Test: deliver to the teacher portal</b>.</p></div>
+  <div class="stack-s"><p class="label">Simulation · this phone only</p><h1>Simulate a user</h1>
+    <p class="muted">Use Step2Read exactly as a teacher or a parent would. <b>Nothing you do in a simulation is sent or recorded</b>: it stays on this phone. Each view keeps its own data, so you can switch back and forth. Tap the label at the top right to come back here.</p></div>
+  <div class="card stack-s"><h3>Simulate</h3><div class="list">${["teacher", "parent"].map(row).join("")}</div>
+    <p class="small muted">To try the school–home link on one phone: as the teacher, open a learner and tap <b>Test: open as this child's parent</b>. As the parent, tap <b>Test: deliver to the teacher portal</b>.</p></div>
   <div class="card stack-s"><h3>Examples</h3><div class="list">${["ex-g2", "ex-g1", "ex-p"].concat(ids.includes("main") ? ["main"] : []).map(row).join("")}</div></div>
-  <div class="card stack-s"><h3>Access levels</h3>
-    <div class="list">${ACCESS.map((a) => `<div class="li"><div style="min-width:0"><div class="name">${a.name}</div><div class="small muted">${a.what}</div></div><span class="hb ${a.now ? "ok" : ""}">${a.now ? "Live" : "Planned"}</span></div>`).join("")}</div>
-    <p class="small muted">Planned levels need data from several phones in one place, so they come with the online version.</p></div>
-  <div class="row"><button class="btn ghost" data-act="adminOff">Leave super admin</button></div>
+  <div class="row"><button class="btn ghost" data-act="adminOff">Leave the simulation</button></div>
 </div>`;
 }
 function openPortal(id) {
@@ -2035,7 +2036,7 @@ const Gate = (() => {
     else body = { overview: pOverview, results: pResults, people: pPeople, schools: pSchools }[G.tab](D, p);
     return `<div class="stack">
       <div class="row" style="justify-content:space-between;align-items:flex-end"><div class="stack-s"><p class="label">${ROLE_LABEL[p.role]} · ${scope}</p><h1>Programme portal</h1></div>
-        <div class="row"><button class="btn mat" data-g="refresh" ${G.loading ? "disabled" : ""}>${G.loading ? "Refreshing…" : "Refresh"}</button><button class="btn mat primary" data-g="toApp">Open the reading app</button></div></div>
+        <div class="row"><button class="btn mat" data-g="refresh" ${G.loading ? "disabled" : ""}>${G.loading ? "Refreshing…" : "Refresh"}</button><button class="btn mat primary" data-g="toApp">Open the reading app</button>${isProg(p) ? `<button class="btn mat" data-g="simulate">Simulate a teacher or parent</button>` : ""}</div></div>
       ${sup && D.hasDemo ? `<div class="${G.demo ? "banner" : "banner info"} row" style="justify-content:space-between"><span class="small">${G.demo ? "<b>Demo and test data.</b> Showing the demo class (DEMO), classes from your super admin account (TEST) and onboarding practice classes (PRACTICE). Real programme results are hidden." : "The demo class, onboarding practice, and anything entered from programme-level accounts (super admin and programme admins) are kept as test data: never counted in programme results, and only programme admins can see them."}</span><button class="btn mat ${G.demo ? "" : "maize"}" data-g="demo">${G.demo ? "Back to programme results" : "Show demo and test data"}</button></div>` : ""}
       <nav class="ptabs" aria-label="Portal sections">${tabs.map(([k, l]) => `<button data-g="tab" data-v="${k}" ${G.tab === k ? 'aria-current="page"' : ""}>${l}</button>`).join("")}</nav>
       ${note()}${body}
@@ -2220,6 +2221,7 @@ const Gate = (() => {
     back: () => { say(); G.screen = null; render(); },
     toPortal: () => { setView("portal"); say(); G.screen = "portal"; draw(); window.scrollTo(0, 0); },
     toApp: () => { setView("app"); say(); G.screen = null; render(); window.scrollTo(0, 0); },
+    simulate: () => { if (!isProg(me())) return; setView("app"); say(); G.screen = null; WS.admin = true; wsSave(); save(); go("admin"); },
     signOut: () => { Auth.signOut(); setView("portal"); location.reload(); },
     tab: (el) => { G.tab = el.dataset.v; G.edit = null; say(); draw(); },
     refresh: () => { say(); loadData(true); },
@@ -2387,7 +2389,7 @@ document.addEventListener("click", async (e) => {
     restore: () => { try { const s = JSON.parse($("#rs").value); if (!s || !Array.isArray(s.learners)) throw 0; S = { ...blank(), ...s, ui: { screen: "home" } }; save(); render(); } catch (x) { $("#rsMsg").textContent = "That text is not a Step2Read backup. Paste the whole backup and try again."; } },
     askReset: () => { S.ui.confirmReset = true; render(); }, cancelReset: () => { S.ui.confirmReset = false; render(); },
     adminOn: () => { WS.admin = true; wsSave(); save(); go("admin"); },
-    adminOff: () => { WS.admin = false; wsSave(); S = load(); render(); },
+    adminOff: () => { save(); WS.admin = false; WS.cur = "main"; wsSave(); S = load(); render(); },
     adminConsole: () => { if (WS.admin) go("admin"); },
     openPortal: () => openPortal(el.dataset.v),
     wsAskReset: () => { S.ui.confirmWs = el.dataset.v; render(); },
